@@ -215,8 +215,10 @@ public class EncodingConverter
         if (targetPreamble.Length > 0)
             await output.WriteAsync(targetPreamble, 0, targetPreamble.Length, cancellationToken);
 
-        // The strict target instance (from Encoding.GetEncoding) never emits a BOM on
-        // its own; the preamble was written above only when the user asked for one.
+        // The preamble was written above only when the user asked for one. The strict
+        // target instance preserves the original BOM flag, but the writer skips its
+        // own preamble once the stream position is past zero; for BOM-less targets the
+        // cloned encoding's preamble is empty either way, so nothing extra is emitted.
         using var writer = new StreamWriter(output, targetEncoding, BufferSize, leaveOpen: false);
         var buffer = new char[BufferSize];
         int charsRead;
@@ -263,10 +265,15 @@ public class EncodingConverter
 
     private static Encoding GetStrictEncoding(Encoding encoding)
     {
-        return Encoding.GetEncoding(
-            encoding.CodePage,
-            EncoderFallback.ExceptionFallback,
-            DecoderFallback.ExceptionFallback);
+        // Clone instead of Encoding.GetEncoding(codePage): a code-page lookup
+        // loses the BOM flag (GetEncoding(65001) returns a BOM-emitting instance),
+        // which would silently add a BOM to "UTF-8 without BOM" conversions.
+        // Clone keeps the original BOM intent and returns a writable copy, so the
+        // strict fallbacks can be applied to it.
+        var strict = (Encoding)encoding.Clone();
+        strict.EncoderFallback = EncoderFallback.ExceptionFallback;
+        strict.DecoderFallback = DecoderFallback.ExceptionFallback;
+        return strict;
     }
 
     private static void CopyFile(string source, string destination)

@@ -266,7 +266,10 @@ public class EncodingConverterTests : IDisposable
     {
         var utf8BOM = new UTF8Encoding(true);
         var filePath = Path.Combine(_sourceDir, "test.txt");
-        File.WriteAllBytes(filePath, utf8BOM.GetBytes("Hello"));
+        // UTF8Encoding.GetBytes never includes the preamble; write it explicitly
+        // so the source file really starts with EF BB BF.
+        var bytes = utf8BOM.GetPreamble().Concat(utf8BOM.GetBytes("Hello")).ToArray();
+        File.WriteAllBytes(filePath, bytes);
 
         var item = new FileConversionItem
         {
@@ -288,5 +291,35 @@ public class EncodingConverterTests : IDisposable
         // Should NOT have BOM
         Assert.False(outputBytes.Length >= 3 && outputBytes[0] == 0xEF && outputBytes[1] == 0xBB && outputBytes[2] == 0xBF);
         Assert.Equal("Hello", new UTF8Encoding(false).GetString(outputBytes));
+        Assert.Equal(ConversionStatus.Success, item.Status);
+    }
+
+    [Fact]
+    public async Task ConvertAsync_GBKToUTF8WithBom_WritesExactlyOneBom()
+    {
+        var gbk = Encoding.GetEncoding("GBK");
+        var filePath = Path.Combine(_sourceDir, "test.txt");
+        File.WriteAllBytes(filePath, gbk.GetBytes("你好世界"));
+
+        var item = new FileConversionItem
+        {
+            RelativePath = "test.txt",
+            FileName = "test.txt",
+            FileSize = new FileInfo(filePath).Length,
+            DetectedEncoding = "GBK",
+            TargetEncoding = "utf-8",
+            IsSelected = true
+        };
+
+        var converter = new EncodingConverter();
+        await converter.ConvertAsync(
+            new List<FileConversionItem> { item },
+            _sourceDir, _outputDir, new UTF8Encoding(true));
+
+        var outputBytes = File.ReadAllBytes(Path.Combine(_outputDir, "test.txt"));
+        // Exactly one BOM up front, no second one right after it.
+        Assert.True(outputBytes.Length >= 3 && outputBytes[0] == 0xEF && outputBytes[1] == 0xBB && outputBytes[2] == 0xBF);
+        Assert.False(outputBytes.Length >= 6 && outputBytes[3] == 0xEF && outputBytes[4] == 0xBB && outputBytes[5] == 0xBF);
+        Assert.Equal("你好世界", new UTF8Encoding(false).GetString(outputBytes, 3, outputBytes.Length - 3));
     }
 }
