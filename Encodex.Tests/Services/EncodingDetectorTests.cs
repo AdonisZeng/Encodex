@@ -197,4 +197,26 @@ public class EncodingDetectorTests : IDisposable
         Assert.Null(result.Encoding);
         Assert.False(result.IsBinary);
     }
+
+    [Fact]
+    public void Detect_UTF16LEWithBom_EncodingNameIsSymmetric()
+    {
+        var encoding = new UnicodeEncoding(false, true);
+        var bytes = encoding.GetPreamble().Concat(encoding.GetBytes("Hello")).ToArray();
+
+        var result = new EncodingDetector().Detect(bytes);
+
+        Assert.Equal("utf-16LE", result.EncodingName);
+    }
+
+    [Fact]
+    public void Detect_UTF32LEWithBom_EncodingNameIsSymmetric()
+    {
+        var encoding = new UTF32Encoding(false, true);
+        var bytes = encoding.GetPreamble().Concat(encoding.GetBytes("Hello")).ToArray();
+
+        var result = new EncodingDetector().Detect(bytes);
+
+        Assert.Equal("utf-32LE", result.EncodingName);
+    }
 }

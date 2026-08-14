@@ -7,7 +7,7 @@ public partial class FileConversionItem : ObservableObject
     public string RelativePath { get; init; } = "";
     public string FileName { get; init; } = "";
     public long FileSize { get; init; }
-    public string? DetectedEncoding { get; init; }
+    public string? DetectedEncoding { get; set; }
     public string TargetEncoding { get; set; } = "";
 
     [ObservableProperty]

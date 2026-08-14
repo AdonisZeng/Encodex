@@ -11,8 +11,12 @@ internal static class PathHelper
 {
     public static string GetRelativePath(string relativeTo, string path)
     {
-        var fromParts = Path.GetFullPath(relativeTo).TrimEnd('\\').Split('\\');
-        var toParts = Path.GetFullPath(path).Split('\\');
+        // Split with RemoveEmptyEntries instead of TrimEnd('\\'): a rooted path such
+        // as "C:\" otherwise degrades to "C:" when the trailing separator is trimmed.
+        var fromParts = Path.GetFullPath(relativeTo)
+            .Split(new[] { Path.DirectorySeparatorChar }, StringSplitOptions.RemoveEmptyEntries);
+        var toParts = Path.GetFullPath(path)
+            .Split(new[] { Path.DirectorySeparatorChar }, StringSplitOptions.RemoveEmptyEntries);
 
         int common = 0;
         while (common < fromParts.Length && common < toParts.Length &&

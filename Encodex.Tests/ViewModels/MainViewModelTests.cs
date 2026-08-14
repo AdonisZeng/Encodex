@@ -189,6 +189,46 @@ public class MainViewModelTests : IDisposable
     }
 
     [Fact]
+    public async Task ConvertAsync_Utf8WithBom_OutputFolderIsDistinct()
+    {
+        var dir = Path.Combine(_tempDir, "src");
+        Directory.CreateDirectory(dir);
+        File.WriteAllText(Path.Combine(dir, "a.txt"), "hello");
+
+        var vm = CreateViewModel();
+        vm.SourceFolderPath = dir;
+        await vm.ScanCommand.ExecuteAsync(null);
+        vm.SelectedEncoding = vm.AvailableEncodings.First(e => e.DisplayName.Contains("带 BOM"));
+
+        await vm.ConvertCommand.ExecuteAsync(null);
+
+        Assert.NotNull(vm.Summary);
+        Assert.EndsWith("_utf-8-bom", vm.Summary!.OutputPath);
+    }
+
+    [Fact]
+    public async Task ScanAsync_PersistsFolderEncodingAndExtensions()
+    {
+        var dir = Path.Combine(_tempDir, "src");
+        Directory.CreateDirectory(dir);
+        File.WriteAllText(Path.Combine(dir, "a.cs"), "int x = 1;");
+
+        var settingsPath = Path.Combine(_tempDir, "settings.json");
+        var vm = new MainViewModel(new AppSettingsStore(settingsPath));
+        vm.SourceFolderPath = dir;
+        vm.SelectedEncoding = vm.AvailableEncodings.First(e => e.DisplayName == "GBK");
+        vm.ExtensionOptions.First(o => o.Extension == ".md").IsSelected = false;
+
+        await vm.ScanCommand.ExecuteAsync(null);
+
+        // A fresh view model over the same settings file restores the choices.
+        var vm2 = new MainViewModel(new AppSettingsStore(settingsPath));
+        Assert.Equal(dir, vm2.SourceFolderPath);
+        Assert.Equal("GBK", vm2.SelectedEncoding!.DisplayName);
+        Assert.False(vm2.ExtensionOptions.First(o => o.Extension == ".md").IsSelected);
+    }
+
+    [Fact]
     public void Reset_ClearsReportSections()
     {
         var vm = CreateViewModel();

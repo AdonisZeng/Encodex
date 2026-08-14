@@ -1,4 +1,5 @@
 using CommunityToolkit.Mvvm.ComponentModel;
+using Encodex.Resources;
 
 namespace Encodex.Models;
 
@@ -9,6 +10,9 @@ public partial class ReportSection : ObservableObject
     public string Icon { get; }
     public string Title { get; }
     public int Count { get; }
+
+    /// <summary>Localized "N 个文件" suffix for the section header.</summary>
+    public string CountText => string.Format(Res.Ui_ReportFiles, Count);
 
     /// <summary>Display entries: relative path, with the status reason appended when present.</summary>
     public IReadOnlyList<string> Files { get; }

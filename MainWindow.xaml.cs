@@ -1,15 +1,14 @@
-﻿using System.Windows;
+﻿using System.IO;
+using System.Windows;
+using Encodex.Resources;
 using Encodex.Services;
 using Encodex.ViewModels;
-using Wpf.Ui.Appearance;
 using Wpf.Ui.Controls;
 
 namespace Encodex
 {
     public partial class MainWindow : FluentWindow
     {
-        private readonly AppSettingsStore _settingsStore = new();
-
         public MainWindow()
         {
             InitializeComponent();
@@ -20,21 +19,23 @@ namespace Encodex
             var failedUpdate = AppUpdateService.DetectFailedUpdate();
             if (failedUpdate != null)
                 Loaded += (_, _) => System.Windows.MessageBox.Show(
-                    failedUpdate, "Encodex 更新", System.Windows.MessageBoxButton.OK, System.Windows.MessageBoxImage.Warning);
+                    failedUpdate, Res.Upd_DialogTitle, System.Windows.MessageBoxButton.OK, System.Windows.MessageBoxImage.Warning);
         }
 
-        private void ThemeToggleButton_Click(object sender, RoutedEventArgs e)
+        /// <summary>Drop a folder anywhere on the window to select it as the source.</summary>
+        private void Window_Drop(object sender, DragEventArgs e)
         {
             if (DataContext is not MainViewModel vm)
                 return;
 
-            vm.ToggleThemeCommand.Execute(null);
-            // Keep the window's default backdrop (None): only swap the theme resources.
-            ApplicationThemeManager.Apply(
-                vm.IsLightTheme ? ApplicationTheme.Light : ApplicationTheme.Dark,
-                WindowBackdropType.None,
-                updateAccent: true);
-            _settingsStore.Save(new AppSettings { IsLightTheme = vm.IsLightTheme });
+            if (e.Data.GetDataPresent(DataFormats.FileDrop) &&
+                e.Data.GetData(DataFormats.FileDrop) is string[] paths &&
+                paths.Length > 0 &&
+                Directory.Exists(paths[0]))
+            {
+                vm.SourceFolderPath = paths[0];
+                vm.StatusText = string.Format(Res.VM_Selected, paths[0]);
+            }
         }
     }
 }

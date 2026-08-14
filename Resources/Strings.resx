@@ -1,0 +1,129 @@
+<?xml version="1.0" encoding="utf-8"?>
+<root>
+  <resheader name="resmimetype"><value>text/microsoft-resx</value></resheader>
+  <resheader name="version"><value>2.0</value></resheader>
+  <resheader name="reader"><value>System.Resources.ResXResourceReader, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value></resheader>
+  <resheader name="writer"><value>System.Resources.ResXResourceWriter, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value></resheader>
+  <data name="Ui_Title" xml:space="preserve"><value>Encodex - 编码转换工具</value></data>
+  <data name="Ui_TabConfig" xml:space="preserve"><value>① 配置</value></data>
+  <data name="Ui_TabFiles" xml:space="preserve"><value>② 文件列表</value></data>
+  <data name="Ui_TabConvert" xml:space="preserve"><value>③ 转换</value></data>
+  <data name="Ui_TabReport" xml:space="preserve"><value>④ 报告</value></data>
+  <data name="Ui_SourceFolder" xml:space="preserve"><value>源文件夹</value></data>
+  <data name="Ui_Browse" xml:space="preserve"><value>浏览</value></data>
+  <data name="Ui_TargetEncoding" xml:space="preserve"><value>目标编码</value></data>
+  <data name="Ui_OverwriteInPlace" xml:space="preserve"><value>原地覆盖源文件（转换前自动备份到临时目录）</value></data>
+  <data name="Ui_FileExtensions" xml:space="preserve"><value>文件扩展名</value></data>
+  <data name="Ui_ExtensionsHint" xml:space="preserve"><value>按分类展开并勾选需要处理的扩展名，取消勾选即可停用（可随时重新勾选）</value></data>
+  <data name="Ui_AddExtension" xml:space="preserve"><value>＋ 添加扩展名</value></data>
+  <data name="Ui_Scan" xml:space="preserve"><value>扫描预览 →</value></data>
+  <data name="Ui_ScannedCount" xml:space="preserve"><value>已扫描 {0} 个文件</value></data>
+  <data name="Ui_PreviewSelected" xml:space="preserve"><value>预览选中文件</value></data>
+  <data name="Ui_Convert" xml:space="preserve"><value>执行转换 →</value></data>
+  <data name="Ui_Select" xml:space="preserve"><value>选择</value></data>
+  <data name="Ui_FilePath" xml:space="preserve"><value>文件路径</value></data>
+  <data name="Ui_Size" xml:space="preserve"><value>大小</value></data>
+  <data name="Ui_DetectedEncoding" xml:space="preserve"><value>检测编码</value></data>
+  <data name="Ui_TargetEncodingCol" xml:space="preserve"><value>目标编码</value></data>
+  <data name="Ui_Status" xml:space="preserve"><value>状态</value></data>
+  <data name="Ui_Details" xml:space="preserve"><value>详情</value></data>
+  <data name="Ui_CancelConvert" xml:space="preserve"><value>取消转换</value></data>
+  <data name="Ui_ReportTitle" xml:space="preserve"><value>转换完成</value></data>
+  <data name="Ui_ReportHint" xml:space="preserve"><value>点击下方各项可展开查看具体文件</value></data>
+  <data name="Ui_ReportFiles" xml:space="preserve"><value>{0} 个文件</value></data>
+  <data name="Ui_OutputDir" xml:space="preserve"><value>输出目录:</value></data>
+  <data name="Ui_OpenFolder" xml:space="preserve"><value>打开文件夹</value></data>
+  <data name="Ui_Rescan" xml:space="preserve"><value>重新扫描</value></data>
+  <data name="Ui_SelectNewFolder" xml:space="preserve"><value>选择新文件夹</value></data>
+  <data name="Ui_CheckUpdate" xml:space="preserve"><value>🔄</value></data>
+  <data name="Ui_CheckUpdateTooltip" xml:space="preserve"><value>检查更新</value></data>
+  <data name="Ui_ThemeTooltip" xml:space="preserve"><value>切换浅色 / 深色模式</value></data>
+  <data name="Ui_AddExtTitle" xml:space="preserve"><value>添加扩展名</value></data>
+  <data name="Ui_AddExtPrompt" xml:space="preserve"><value>请输入自定义的文件扩展名</value></data>
+  <data name="Ui_AddExtPlaceholder" xml:space="preserve"><value>例如: .log</value></data>
+  <data name="Ui_Ok" xml:space="preserve"><value>确定</value></data>
+  <data name="Ui_Cancel" xml:space="preserve"><value>取消</value></data>
+  <data name="VM_SelectFolder" xml:space="preserve"><value>请选择项目文件夹</value></data>
+  <data name="VM_SelectValidFolder" xml:space="preserve"><value>请选择有效的文件夹</value></data>
+  <data name="VM_SelectExtension" xml:space="preserve"><value>请至少勾选一个文件扩展名</value></data>
+  <data name="VM_Scanning" xml:space="preserve"><value>正在扫描...</value></data>
+  <data name="VM_Scanned" xml:space="preserve"><value>已扫描 {0} 个文件</value></data>
+  <data name="VM_ScanFailed" xml:space="preserve"><value>扫描失败: {0}</value></data>
+  <data name="VM_Converting" xml:space="preserve"><value>正在转换...</value></data>
+  <data name="VM_ConvertDone" xml:space="preserve"><value>转换完成: 成功 {0}, 跳过 {1}, 失败 {2}, 复制 {3}</value></data>
+  <data name="VM_ConvertCancelled" xml:space="preserve"><value>转换已取消</value></data>
+  <data name="VM_Selected" xml:space="preserve"><value>已选择: {0}</value></data>
+  <data name="VM_InvalidExtension" xml:space="preserve"><value>扩展名 "{0}" 无效或已存在。</value></data>
+  <data name="VM_AddExtensionTitle" xml:space="preserve"><value>添加扩展名</value></data>
+  <data name="VM_Binary" xml:space="preserve"><value>二进制文件</value></data>
+  <data name="VM_BackupDir" xml:space="preserve"><value>备份目录（可从该目录恢复原文件）: {0}</value></data>
+  <data name="VM_SuccessSection" xml:space="preserve"><value>成功转换</value></data>
+  <data name="VM_SkippedSection" xml:space="preserve"><value>跳过</value></data>
+  <data name="VM_FailedSection" xml:space="preserve"><value>失败</value></data>
+  <data name="VM_CopiedSection" xml:space="preserve"><value>复制</value></data>
+  <data name="VM_CopyFailed" xml:space="preserve"><value>（复制失败）</value></data>
+  <data name="VM_CheckingUpdate" xml:space="preserve"><value>正在检查更新...</value></data>
+  <data name="VM_UpToDate" xml:space="preserve"><value>当前已是最新版本 (v{0})</value></data>
+  <data name="VM_UpToDateBox" xml:space="preserve"><value>当前已是最新版本 (v{0})。</value></data>
+  <data name="VM_CheckUpdateTitle" xml:space="preserve"><value>检查更新</value></data>
+  <data name="VM_UpdateNotes" xml:space="preserve"><value>更新内容:
+{0}</value></data>
+  <data name="VM_NewVersion" xml:space="preserve"><value>发现新版本 v{0}（当前 v{1}）{2}
+
+是否立即下载并安装？</value></data>
+  <data name="VM_NewVersionTitle" xml:space="preserve"><value>发现新版本</value></data>
+  <data name="VM_UpdateCancelled" xml:space="preserve"><value>已取消更新</value></data>
+  <data name="VM_Downloading" xml:space="preserve"><value>正在下载更新包...</value></data>
+  <data name="VM_DownloadingPercent" xml:space="preserve"><value>正在下载更新包... {0}%</value></data>
+  <data name="VM_ReadyToUpdate" xml:space="preserve"><value>更新包已下载完成。
+应用即将关闭并自动完成更新，请确认当前没有进行中的转换。</value></data>
+  <data name="VM_ReadyToUpdateTitle" xml:space="preserve"><value>准备更新</value></data>
+  <data name="VM_ApplyingUpdate" xml:space="preserve"><value>正在应用更新...</value></data>
+  <data name="VM_UpdateFailed" xml:space="preserve"><value>检查更新失败: {0}</value></data>
+  <data name="Conv_UnknownCopy" xml:space="preserve"><value>检测失败，原样复制</value></data>
+  <data name="Conv_SameCopy" xml:space="preserve"><value>编码相同，原样复制</value></data>
+  <data name="Conv_DecodeFailed" xml:space="preserve"><value>解码失败，原样复制</value></data>
+  <data name="Conv_EncodeFailed" xml:space="preserve"><value>目标编码无法表示部分字符，原样复制</value></data>
+  <data name="Upd_NetworkError" xml:space="preserve"><value>无法获取版本信息，请检查网络连接。</value></data>
+  <data name="Upd_MissingVersion" xml:space="preserve"><value>update.xml 缺少 version 节点</value></data>
+  <data name="Upd_MissingUrl" xml:space="preserve"><value>update.xml 缺少 url 节点</value></data>
+  <data name="Upd_InvalidXml" xml:space="preserve"><value>update.xml 内容无效，无法解析。</value></data>
+  <data name="Upd_DownloadFailed" xml:space="preserve"><value>下载更新包失败，请检查网络连接。</value></data>
+  <data name="Upd_ChecksumFailed" xml:space="preserve"><value>更新包校验失败（SHA-256 不一致），文件可能已损坏，请重试。</value></data>
+  <data name="Upd_MissingUpdater" xml:space="preserve"><value>未找到 {0}，无法执行更新。</value></data>
+  <data name="Upd_LaunchFailed" xml:space="preserve"><value>无法启动 {0}。</value></data>
+  <data name="Upd_FailedUpdateLeftover" xml:space="preserve"><value>上一次自动更新未能完成安装（更新器在替换文件时中断），当前可能仍是旧版本。
+请再次点击 🔄 检查更新重试，或从 GitHub Releases 手动下载最新版本。</value></data>
+  <data name="Upd_DialogTitle" xml:space="preserve"><value>Encodex 更新</value></data>
+  <data name="Prev_Title" xml:space="preserve"><value>转换预览 - {0}</value></data>
+  <data name="Prev_File" xml:space="preserve"><value>文件: {0}</value></data>
+  <data name="Prev_UnknownEncoding" xml:space="preserve"><value>检测编码: {0}（无法识别，转换时该文件将被原样复制）</value></data>
+  <data name="Prev_EncodingInfo" xml:space="preserve"><value>检测编码: {0}  →  目标编码: {1}</value></data>
+  <data name="Prev_ReadFailed" xml:space="preserve"><value>无法读取文件: {0}</value></data>
+  <data name="Prev_NoPreview" xml:space="preserve"><value>无法预览：源编码未知。</value></data>
+  <data name="Prev_Unrepresentable" xml:space="preserve"><value>（目标编码无法表示源文本中的部分字符，转换时该文件会被原样复制）</value></data>
+  <data name="Prev_Truncated" xml:space="preserve"><value>...（共 {0} 字节，显示前 {1} 字节）</value></data>
+  <data name="Cli_UnknownArg" xml:space="preserve"><value>未知参数: {0}（使用 --help 查看用法）</value></data>
+  <data name="Cli_InvalidSrc" xml:space="preserve"><value>错误: --src 必须指向存在的文件夹</value></data>
+  <data name="Cli_MissingTarget" xml:space="preserve"><value>错误: 缺少 --target</value></data>
+  <data name="Cli_UnsupportedTarget" xml:space="preserve"><value>错误: 不支持的目标编码 "{0}"</value></data>
+  <data name="Cli_ConflictOut" xml:space="preserve"><value>错误: --overwrite 与 --out 不能同时使用</value></data>
+  <data name="Cli_InvalidExt" xml:space="preserve"><value>警告: 忽略无效扩展名 "{0}"</value></data>
+  <data name="Cli_NoValidExt" xml:space="preserve"><value>错误: 没有有效的扩展名</value></data>
+  <data name="Cli_ScanSummary" xml:space="preserve"><value>扫描: {0} 个匹配文件, {1} 个未匹配文件</value></data>
+  <data name="Cli_ConvertSummary" xml:space="preserve"><value>转换完成: 成功 {0}, 跳过 {1}, 失败 {2}, 复制 {3}</value></data>
+  <data name="Cli_BackupDir" xml:space="preserve"><value>备份目录: {0}</value></data>
+  <data name="Cli_FailedFile" xml:space="preserve"><value>  失败: {0}: {1}</value></data>
+  <data name="Cli_HelpTitle" xml:space="preserve"><value>Encodex CLI - 批量编码转换</value></data>
+  <data name="Cli_HelpUsage" xml:space="preserve"><value>用法: Encodex.exe --cli --src &lt;文件夹&gt; --target &lt;编码&gt; [选项]</value></data>
+  <data name="Cli_HelpRequired" xml:space="preserve"><value>必填:</value></data>
+  <data name="Cli_HelpSrc" xml:space="preserve"><value>  --src &lt;文件夹&gt;   源文件夹</value></data>
+  <data name="Cli_HelpTarget" xml:space="preserve"><value>  --target &lt;编码&gt;  目标编码: utf-8 | utf-8-bom | utf-16le | utf-16be |</value></data>
+  <data name="Cli_HelpTarget2" xml:space="preserve"><value>                  utf-32le | utf-32be | gbk | gb2312 | gb18030 | big5 |</value></data>
+  <data name="Cli_HelpTarget3" xml:space="preserve"><value>                  shift-jis | euc-kr | ascii | iso-8859-1</value></data>
+  <data name="Cli_HelpOptions" xml:space="preserve"><value>选项:</value></data>
+  <data name="Cli_HelpOut" xml:space="preserve"><value>  --out &lt;文件夹&gt;   输出到指定文件夹（默认 &lt;源文件夹&gt;_&lt;编码&gt;）</value></data>
+  <data name="Cli_HelpOverwrite" xml:space="preserve"><value>  --overwrite      原地覆盖源文件（自动备份到 %TEMP%）</value></data>
+  <data name="Cli_HelpExt" xml:space="preserve"><value>  --ext &lt;列表&gt;     扩展名列表，逗号分隔，如 .cs,.js（默认全部内置扩展名）</value></data>
+  <data name="Cli_HelpHelp" xml:space="preserve"><value>  --help           显示此帮助</value></data>
+</root>

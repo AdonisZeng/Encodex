@@ -2,23 +2,24 @@
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
-        Title="添加扩展名"
+        xmlns:r="clr-namespace:Encodex.Resources"
+        Title="{x:Static r:Res.Ui_AddExtTitle}"
         Width="380" SizeToContent="Height"
         WindowStartupLocation="CenterOwner"
         ResizeMode="NoResize"
         ShowInTaskbar="False">
     <StackPanel Margin="20">
-        <TextBlock Text="请输入自定义的文件扩展名"
+        <TextBlock Text="{x:Static r:Res.Ui_AddExtPrompt}"
                    FontWeight="SemiBold" Margin="0,0,0,8"/>
         <ui:TextBox x:Name="ExtensionInputBox"
-                    PlaceholderText="例如: .log"
+                    PlaceholderText="{x:Static r:Res.Ui_AddExtPlaceholder}"
                     MaxLength="16"
                     Margin="0,0,0,16"/>
         <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
-            <ui:Button Content="确定" Appearance="Primary"
+            <ui:Button Content="{x:Static r:Res.Ui_Ok}" Appearance="Primary"
                        IsDefault="True" Click="OkButton_Click"
                        Padding="16,4" Margin="0,0,8,0"/>
-            <Button Content="取消" IsCancel="True" Padding="16,4"/>
+            <Button Content="{x:Static r:Res.Ui_Cancel}" IsCancel="True" Padding="16,4"/>
         </StackPanel>
     </StackPanel>
 </Window>

@@ -32,9 +32,9 @@ public class EncodingDetector
 
         // 1. BOM detection first. Check 4-byte BOMs (UTF-32) before 2-byte ones
         //    (UTF-16), because UTF-32LE starts with FF FE 00 00.
-        var bomEncoding = DetectByBom(bytes);
-        if (bomEncoding != null)
-            return new DetectionResult { Encoding = bomEncoding, EncodingName = bomEncoding.WebName };
+        var bom = DetectByBom(bytes);
+        if (bom != null)
+            return new DetectionResult { Encoding = bom.Value.Encoding, EncodingName = bom.Value.Name };
 
         // 2. Null-byte check: marks binaries, but BOM-less UTF-16 text legitimately
         //    contains 0x00 in every other byte, so try to tell the two apart first.
@@ -42,7 +42,7 @@ public class EncodingDetector
         {
             var utf16 = TryDetectUtf16WithoutBom(bytes);
             if (utf16 != null)
-                return new DetectionResult { Encoding = utf16, EncodingName = utf16.WebName };
+                return new DetectionResult { Encoding = utf16.Value.Encoding, EncodingName = utf16.Value.Name };
             return new DetectionResult { IsBinary = true };
         }
 
@@ -83,18 +83,18 @@ public class EncodingDetector
         }
     }
 
-    private static Encoding? DetectByBom(byte[] bytes)
+    private static (Encoding Encoding, string Name)? DetectByBom(byte[] bytes)
     {
         if (bytes.Length >= 4 && bytes[0] == 0x00 && bytes[1] == 0x00 && bytes[2] == 0xFE && bytes[3] == 0xFF)
-            return new UTF32Encoding(bigEndian: true, byteOrderMark: true);
+            return (new UTF32Encoding(bigEndian: true, byteOrderMark: true), "utf-32BE");
         if (bytes.Length >= 4 && bytes[0] == 0xFF && bytes[1] == 0xFE && bytes[2] == 0x00 && bytes[3] == 0x00)
-            return new UTF32Encoding(bigEndian: false, byteOrderMark: true);
+            return (new UTF32Encoding(bigEndian: false, byteOrderMark: true), "utf-32LE");
         if (bytes.Length >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF)
-            return new UTF8Encoding(true);
+            return (new UTF8Encoding(true), "utf-8");
         if (bytes.Length >= 2 && bytes[0] == 0xFF && bytes[1] == 0xFE)
-            return new UnicodeEncoding(false, true);
+            return (new UnicodeEncoding(false, true), "utf-16LE");
         if (bytes.Length >= 2 && bytes[0] == 0xFE && bytes[1] == 0xFF)
-            return new UnicodeEncoding(true, true);
+            return (new UnicodeEncoding(true, true), "utf-16BE");
         return null;
     }
 
@@ -116,7 +116,7 @@ public class EncodingDetector
     /// Heuristic: most nulls must share one parity and the non-null bytes must look
     /// like printable text.
     /// </summary>
-    private static Encoding? TryDetectUtf16WithoutBom(byte[] bytes)
+    private static (Encoding Encoding, string Name)? TryDetectUtf16WithoutBom(byte[] bytes)
     {
         int checkLength = Math.Min(bytes.Length, 8192);
         int nulls = 0, nullsOnOdd = 0, nonNullAscii = 0, nonNullTotal = 0;
@@ -154,9 +154,9 @@ public class EncodingDetector
         bool beLike = (double)(nulls - nullsOnOdd) / nulls >= 0.6;
 
         if (leLike)
-            return new UnicodeEncoding(bigEndian: false, byteOrderMark: false);
+            return (new UnicodeEncoding(bigEndian: false, byteOrderMark: false), "utf-16LE");
         if (beLike)
-            return new UnicodeEncoding(bigEndian: true, byteOrderMark: false);
+            return (new UnicodeEncoding(bigEndian: true, byteOrderMark: false), "utf-16BE");
         return null;
     }
 }

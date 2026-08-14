@@ -325,4 +325,124 @@ public class EncodingConverterTests : IDisposable
         Assert.False(outputBytes.Length >= 6 && outputBytes[3] == 0xEF && outputBytes[4] == 0xBB && outputBytes[5] == 0xBF);
         Assert.Equal("你好世界", new UTF8Encoding(false).GetString(outputBytes, 3, outputBytes.Length - 3));
     }
+
+    [Fact]
+    public async Task ConvertAsync_DetectedUtf16LE_ConvertsCorrectly()
+    {
+        // DetectedEncoding now uses the symmetric name "utf-16LE"; make sure the
+        // converter still round-trips it correctly (no BOM corruption, no copy-as-is).
+        var utf16 = new UnicodeEncoding(false, true);
+        var bytes = utf16.GetPreamble().Concat(utf16.GetBytes("你好世界")).ToArray();
+        var filePath = Path.Combine(_sourceDir, "test.txt");
+        File.WriteAllBytes(filePath, bytes);
+
+        var item = new FileConversionItem
+        {
+            RelativePath = "test.txt",
+            FileName = "test.txt",
+            FileSize = bytes.Length,
+            DetectedEncoding = "utf-16LE",
+            TargetEncoding = "utf-8",
+            IsSelected = true
+        };
+
+        var converter = new EncodingConverter();
+        var summary = await converter.ConvertAsync(
+            new List<FileConversionItem> { item },
+            _sourceDir, _outputDir, new UTF8Encoding(false));
+
+        var content = File.ReadAllText(Path.Combine(_outputDir, "test.txt"), new UTF8Encoding(false));
+        Assert.Equal("你好世界", content);
+        Assert.Equal(ConversionStatus.Success, item.Status);
+        Assert.Equal(1, summary.Success);
+    }
+
+    [Fact]
+    public async Task ConvertAsync_MultipleFiles_ParallelResultsAreCorrect()
+    {
+        var gbk = Encoding.GetEncoding("GBK");
+        var items = new List<FileConversionItem>();
+        for (int i = 0; i < 10; i++)
+        {
+            var name = $"f{i}.txt";
+            File.WriteAllBytes(Path.Combine(_sourceDir, name), gbk.GetBytes($"文件{i}"));
+            items.Add(new FileConversionItem
+            {
+                RelativePath = name,
+                FileName = name,
+                FileSize = new FileInfo(Path.Combine(_sourceDir, name)).Length,
+                DetectedEncoding = "GBK",
+                TargetEncoding = "utf-8",
+                IsSelected = true
+            });
+        }
+
+        var summary = await new EncodingConverter().ConvertAsync(
+            items, _sourceDir, _outputDir, new UTF8Encoding(false));
+
+        Assert.Equal(10, summary.Success);
+        Assert.Equal(0, summary.Failed);
+        for (int i = 0; i < 10; i++)
+            Assert.Equal($"文件{i}", File.ReadAllText(
+                Path.Combine(_outputDir, $"f{i}.txt"), new UTF8Encoding(false)));
+    }
+
+    [Fact]
+    public async Task ConvertAsync_OverwriteInPlace_BacksUpAndRewritesSource()
+    {
+        var gbk = Encoding.GetEncoding("GBK");
+        var filePath = Path.Combine(_sourceDir, "test.txt");
+        var expectedText = "你好世界";
+        File.WriteAllBytes(filePath, gbk.GetBytes(expectedText));
+
+        var item = new FileConversionItem
+        {
+            RelativePath = "test.txt",
+            FileName = "test.txt",
+            FileSize = new FileInfo(filePath).Length,
+            DetectedEncoding = "GBK",
+            TargetEncoding = "utf-8",
+            IsSelected = true
+        };
+
+        var summary = await new EncodingConverter().ConvertAsync(
+            new List<FileConversionItem> { item },
+            _sourceDir, _sourceDir, new UTF8Encoding(false), overwriteInPlace: true);
+
+        Assert.Equal(ConversionStatus.Success, item.Status);
+        Assert.NotNull(summary.BackupDirectory);
+        Assert.True(Directory.Exists(summary.BackupDirectory));
+        Assert.True(File.Exists(Path.Combine(summary.BackupDirectory, "test.txt")));
+        // The source file itself was rewritten to UTF-8.
+        Assert.Equal(expectedText, File.ReadAllText(filePath, new UTF8Encoding(false)));
+        Assert.Equal(1, summary.Success);
+    }
+
+    [Fact]
+    public async Task ConvertAsync_PreservesSourceTimestamps()
+    {
+        var filePath = Path.Combine(_sourceDir, "test.txt");
+        File.WriteAllText(filePath, "hello");
+        var lastWriteUtc = new DateTime(2020, 1, 2, 3, 4, 5, DateTimeKind.Utc);
+        File.SetLastWriteTimeUtc(filePath, lastWriteUtc);
+
+        var item = new FileConversionItem
+        {
+            RelativePath = "test.txt",
+            FileName = "test.txt",
+            FileSize = 5,
+            DetectedEncoding = "utf-8",
+            TargetEncoding = "GBK",
+            IsSelected = true
+        };
+
+        var summary = await new EncodingConverter().ConvertAsync(
+            new List<FileConversionItem> { item },
+            _sourceDir, _outputDir, Encoding.GetEncoding("GBK"));
+
+        Assert.Equal(ConversionStatus.Success, item.Status);
+        var output = Path.Combine(_outputDir, "test.txt");
+        Assert.True(File.Exists(output));
+        Assert.Equal(lastWriteUtc, File.GetLastWriteTimeUtc(output));
+    }
 }

@@ -13,3 +13,6 @@ dist/
 
 # Updater self-replacement leftovers
 *.upd-old
+
+# Reasonix tooling
+.reasonix/

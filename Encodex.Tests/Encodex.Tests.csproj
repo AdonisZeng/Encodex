@@ -21,4 +21,10 @@
     <ProjectReference Include="..\Encodex.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- Tests construct HttpMessageHandler/HttpRequestMessage/HttpResponseMessage
+         directly; on .NET Framework these are type-forwarded to System.Net.Http. -->
+    <Reference Include="System.Net.Http" />
+  </ItemGroup>
+
 </Project>

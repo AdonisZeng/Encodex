@@ -1,0 +1,31 @@
+<Window x:Class="Encodex.PreviewWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
+        Title="转换预览"
+        Width="720" Height="560"
+        WindowStartupLocation="CenterOwner"
+        ShowInTaskbar="False">
+    <Grid Margin="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+
+        <TextBlock x:Name="FileNameText" FontWeight="SemiBold" Margin="0,0,0,4"/>
+        <TextBlock x:Name="EncodingInfoText" Opacity="0.6" Margin="0,0,0,8" TextWrapping="Wrap"/>
+
+        <GroupBox Grid.Row="2" Header="源编码解码文本（前 8 KB）" Margin="0,0,0,8">
+            <TextBox x:Name="SourcePreview" IsReadOnly="True" TextWrapping="Wrap"
+                     VerticalScrollBarVisibility="Auto" FontFamily="Consolas"/>
+        </GroupBox>
+
+        <GroupBox Grid.Row="4" Header="目标编码输出（字节 Hex 预览）" Margin="0,8,0,0">
+            <TextBox x:Name="TargetPreview" IsReadOnly="True" TextWrapping="Wrap"
+                     VerticalScrollBarVisibility="Auto" FontFamily="Consolas"/>
+        </GroupBox>
+    </Grid>
+</Window>

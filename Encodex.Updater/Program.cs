@@ -68,9 +68,29 @@ internal static class Program
                 extractedUpdater, updaterPath, StringComparison.OrdinalIgnoreCase))
         {
             var backup = updaterPath + UpdaterBackupExtension;
+            var movedOldAside = false;
             if (File.Exists(updaterPath))
+            {
                 Retry(() => File.Move(updaterPath, backup), $"备份旧更新器 {updaterPath}");
-            Retry(() => File.Move(extractedUpdater, updaterPath), $"替换更新器 {extractedUpdater}");
+                movedOldAside = true;
+            }
+
+            try
+            {
+                Retry(() => File.Move(extractedUpdater, updaterPath), $"替换更新器 {extractedUpdater}");
+            }
+            catch
+            {
+                // The old exe is already moved aside; restore it so the updater is not
+                // permanently lost when swapping the new one in fails.
+                if (movedOldAside)
+                {
+                    try { Retry(() => File.Move(backup, updaterPath), $"恢复旧更新器 {updaterPath}"); }
+                    catch (Exception rollbackEx) { Log($"回滚更新器失败: {rollbackEx}"); }
+                }
+                throw;
+            }
+
             TryDelete(extractedUpdater);
         }
 
@@ -126,9 +146,7 @@ internal static class Program
                 if (string.IsNullOrEmpty(entry.Name))
                     continue; // Directory entry.
 
-                var destination = Path.GetFullPath(Path.Combine(installDirectory, entry.FullName));
-                if (!destination.StartsWith(installDirectory.TrimEnd('\\') + "\\", StringComparison.OrdinalIgnoreCase))
-                    throw new IOException($"Zip entry escapes the install directory: {entry.FullName}");
+                var destination = ResolveEntryPath(installDirectory, entry.FullName);
 
                 Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
 
@@ -150,6 +168,19 @@ internal static class Program
         }
 
         return updaterDestination;
+    }
+
+    /// <summary>
+    /// Resolves a zip entry's destination inside the install directory, rejecting any
+    /// entry that would escape it (traversal via "..", absolute paths, or alternate
+    /// separators). Extracted for testability of the path-traversal guard.
+    /// </summary>
+    internal static string ResolveEntryPath(string installDirectory, string entryFullName)
+    {
+        var destination = Path.GetFullPath(Path.Combine(installDirectory, entryFullName));
+        if (!destination.StartsWith(installDirectory.TrimEnd('\\') + "\\", StringComparison.OrdinalIgnoreCase))
+            throw new IOException($"Zip entry escapes the install directory: {entryFullName}");
+        return destination;
     }
 
     /// <summary>
