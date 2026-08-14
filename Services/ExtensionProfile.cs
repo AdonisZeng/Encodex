@@ -24,22 +24,53 @@ public class ExtensionProfile
         }
     }
 
-    public static string[] GetDefaultExtensions() => new[]
+    public static string[] GetDefaultExtensions()
+        => GetDefaultGroups().SelectMany(group => group.Extensions).ToArray();
+
+    /// <summary>Default extensions grouped by category for display in the configuration tab.</summary>
+    public static (string Name, string[] Extensions)[] GetDefaultGroups() => new[]
     {
-        ".cs", ".java", ".py", ".js", ".ts", ".jsx", ".tsx", ".md", ".txt", ".json",
-        ".xml", ".html", ".htm", ".css", ".scss", ".less", ".cpp", ".c", ".h", ".hpp",
-        ".go", ".rs", ".rb", ".php", ".swift", ".kt", ".scala", ".sh", ".bat", ".ps1",
-        ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf", ".sql", ".vue", ".svelte"
+        ("编程语言", new[]
+        {
+            ".cs", ".java", ".py", ".js", ".ts", ".jsx", ".tsx", ".cpp", ".c",
+            ".h", ".hpp", ".go", ".rs", ".rb", ".php", ".swift", ".kt", ".scala"
+        }),
+        ("网页前端", new[]
+        {
+            ".html", ".htm", ".css", ".scss", ".less", ".vue", ".svelte"
+        }),
+        ("数据与配置", new[]
+        {
+            ".json", ".xml", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf", ".sql"
+        }),
+        ("文档", new[]
+        {
+            ".md", ".txt"
+        }),
+        ("脚本", new[]
+        {
+            ".sh", ".bat", ".ps1"
+        })
     };
 
     public bool AddExtension(string extension)
+        => AddExtension(extension, out _);
+
+    public bool AddExtension(string extension, out string normalized)
     {
-        extension = NormalizeExtension(extension);
-        if (string.IsNullOrEmpty(extension) || _extensions.Contains(extension))
+        normalized = NormalizeExtension(extension);
+        if (!IsValidExtension(normalized) || _extensions.Contains(normalized))
+        {
+            normalized = "";
             return false;
-        _extensions.Add(extension);
+        }
+        _extensions.Add(normalized);
         return true;
     }
+
+    private static bool IsValidExtension(string extension)
+        => extension.Length >= 2 && extension[0] == '.'
+            && extension.Skip(1).All(char.IsLetterOrDigit);
 
     public bool RemoveExtension(string extension)
     {

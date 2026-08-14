@@ -107,7 +107,8 @@ public class EncodingConverterTests : IDisposable
 
         var copiedBytes = File.ReadAllBytes(Path.Combine(_outputDir, "data.bin"));
         Assert.Equal(originalBytes, copiedBytes);
-        Assert.Equal(ConversionStatus.Skipped, item.Status);
+        Assert.Equal(ConversionStatus.Copied, item.Status);
+        Assert.Equal("检测失败，原样复制", item.StatusMessage);
         Assert.Equal(1, summary.Copied);
         Assert.Equal(0, summary.Success);
     }
@@ -139,7 +140,7 @@ public class EncodingConverterTests : IDisposable
 
         var outputBytes = File.ReadAllBytes(Path.Combine(_outputDir, "broken.txt"));
         Assert.Equal(originalBytes, outputBytes);
-        Assert.Equal(ConversionStatus.Skipped, item.Status);
+        Assert.Equal(ConversionStatus.Copied, item.Status);
         Assert.Equal("解码失败，原样复制", item.StatusMessage);
         Assert.Equal(1, summary.Copied);
     }
@@ -168,7 +169,7 @@ public class EncodingConverterTests : IDisposable
 
         var outputBytes = File.ReadAllBytes(Path.Combine(_outputDir, "chinese.txt"));
         Assert.Equal(File.ReadAllBytes(filePath), outputBytes);
-        Assert.Equal(ConversionStatus.Skipped, item.Status);
+        Assert.Equal(ConversionStatus.Copied, item.Status);
         Assert.Equal("目标编码无法表示部分字符，原样复制", item.StatusMessage);
         Assert.Equal(1, summary.Copied);
     }
@@ -208,12 +209,13 @@ public class EncodingConverterTests : IDisposable
         File.WriteAllBytes(filePath, new byte[] { 0x89, 0x50, 0x4E, 0x47 });
 
         var converter = new EncodingConverter();
-        var (copied, failed) = await converter.CopyUnmatchedFilesAsync(
+        var result = await converter.CopyUnmatchedFilesAsync(
             _sourceDir, _outputDir,
             new List<string> { filePath });
 
-        Assert.Equal(1, copied);
-        Assert.Equal(0, failed);
+        Assert.Equal(1, result.Copied);
+        Assert.Equal(0, result.Failed);
+        Assert.Equal("image.png", Assert.Single(result.CopiedFiles));
         Assert.True(File.Exists(Path.Combine(_outputDir, "image.png")));
     }
 
@@ -225,12 +227,13 @@ public class EncodingConverterTests : IDisposable
         var missing = Path.Combine(_sourceDir, "gone.png");
 
         var converter = new EncodingConverter();
-        var (copied, failed) = await converter.CopyUnmatchedFilesAsync(
+        var result = await converter.CopyUnmatchedFilesAsync(
             _sourceDir, _outputDir,
             new List<string> { existing, missing });
 
-        Assert.Equal(1, copied);
-        Assert.Equal(1, failed);
+        Assert.Equal(1, result.Copied);
+        Assert.Equal(1, result.Failed);
+        Assert.Equal("gone.png", Assert.Single(result.FailedFiles));
         Assert.True(File.Exists(Path.Combine(_outputDir, "ok.png")));
     }
 

@@ -58,29 +58,53 @@
                                   Margin="0,0,0,16" Padding="8"/>
 
                         <TextBlock Text="文件扩展名" FontWeight="SemiBold" Margin="0,0,0,4"/>
-                        <TextBlock Text="勾选需要处理的扩展名，取消勾选即可停用（可随时重新勾选）"
-                                   FontSize="11" Opacity="0.6" Margin="0,0,0,4"/>
-                        <ItemsControl ItemsSource="{Binding ExtensionOptions}" Margin="0,0,0,4">
-                            <ItemsControl.ItemsPanel>
-                                <ItemsPanelTemplate>
-                                    <WrapPanel/>
-                                </ItemsPanelTemplate>
-                            </ItemsControl.ItemsPanel>
+                        <TextBlock Text="按分类展开并勾选需要处理的扩展名，取消勾选即可停用（可随时重新勾选）"
+                                   FontSize="11" Opacity="0.6" Margin="0,0,0,8"/>
+                        <ItemsControl x:Name="ExtensionGroupsList"
+                                      ItemsSource="{Binding ExtensionGroups}"
+                                      Margin="0,0,0,16">
                             <ItemsControl.ItemTemplate>
                                 <DataTemplate>
-                                    <CheckBox Content="{Binding Extension}"
-                                              IsChecked="{Binding IsSelected}"
-                                              Margin="0,0,12,4"/>
+                                    <!-- One collapsible category; collapsed by default.
+                                         Native Expander: WPF-UI 4.x ships no generic Expander
+                                         control, and ControlsDictionary restyles this one. -->
+                                    <Expander Margin="0,0,0,6">
+                                        <Expander.Header>
+                                            <StackPanel Orientation="Horizontal">
+                                                <TextBlock Text="{Binding Name}" VerticalAlignment="Center"/>
+                                                <TextBlock Text="{Binding Extensions.Count, StringFormat=' ({0})'}"
+                                                           VerticalAlignment="Center" Opacity="0.6"/>
+                                            </StackPanel>
+                                        </Expander.Header>
+                                        <!-- StackPanel (not WrapPanel): a WrapPanel would measure
+                                             its children with infinite width, so the inner
+                                             checkbox WrapPanel would never wrap. -->
+                                        <StackPanel Margin="4,2">
+                                            <ItemsControl ItemsSource="{Binding Extensions}">
+                                                <ItemsControl.ItemsPanel>
+                                                    <ItemsPanelTemplate>
+                                                        <WrapPanel/>
+                                                    </ItemsPanelTemplate>
+                                                </ItemsControl.ItemsPanel>
+                                                <ItemsControl.ItemTemplate>
+                                                    <DataTemplate>
+                                                        <CheckBox Content="{Binding Extension}"
+                                                                  IsChecked="{Binding IsSelected}"
+                                                                  Margin="0,0,12,4"/>
+                                                    </DataTemplate>
+                                                </ItemsControl.ItemTemplate>
+                                            </ItemsControl>
+                                            <!-- Trailing add button: opens the custom-extension dialog. -->
+                                            <Button Content="＋ 添加扩展名"
+                                                    Command="{Binding DataContext.AddExtensionCommand, ElementName=ExtensionGroupsList}"
+                                                    CommandParameter="{Binding}"
+                                                    HorizontalAlignment="Left"
+                                                    Margin="0,2,0,4" Padding="8,2" FontSize="12"/>
+                                        </StackPanel>
+                                    </Expander>
                                 </DataTemplate>
                             </ItemsControl.ItemTemplate>
                         </ItemsControl>
-
-                        <DockPanel Margin="0,8,0,16">
-                            <Button DockPanel.Dock="Right" Content="添加" Margin="8,0,0,0"
-                                    Command="{Binding AddExtensionCommand}" Padding="12,4"/>
-                            <ui:TextBox Text="{Binding NewExtensionInput, UpdateSourceTrigger=PropertyChanged}"
-                                        PlaceholderText="例如: .log"/>
-                        </DockPanel>
 
                         <ui:Button Content="扫描预览 →" Appearance="Primary"
                                    Command="{Binding ScanCommand}" Padding="24,8"
@@ -149,31 +173,40 @@
 
                 <!-- Tab 4: Report -->
                 <TabItem Header="④ 报告">
-                    <StackPanel Margin="8" VerticalAlignment="Top">
+                    <!-- The file lists inside the sections can get long: scroll the whole tab. -->
+                    <ScrollViewer VerticalScrollBarVisibility="Auto" Margin="8" Padding="0,0,12,0">
+                    <StackPanel VerticalAlignment="Top">
                         <TextBlock Text="转换完成" FontSize="20" FontWeight="SemiBold" Margin="0,0,0,16"/>
 
-                        <StackPanel Margin="0,0,0,16">
-                            <TextBlock Margin="0,4">
-                                <Run Text="✅ 成功转换: "/>
-                                <Run Text="{Binding Summary.Success}"/>
-                                <Run Text=" 个文件"/>
-                            </TextBlock>
-                            <TextBlock Margin="0,4">
-                                <Run Text="⏭️ 跳过: "/>
-                                <Run Text="{Binding Summary.Skipped}"/>
-                                <Run Text=" 个文件"/>
-                            </TextBlock>
-                            <TextBlock Margin="0,4">
-                                <Run Text="❌ 失败: "/>
-                                <Run Text="{Binding Summary.Failed}"/>
-                                <Run Text=" 个文件"/>
-                            </TextBlock>
-                            <TextBlock Margin="0,4">
-                                <Run Text="📄 复制: "/>
-                                <Run Text="{Binding Summary.Copied}"/>
-                                <Run Text=" 个文件"/>
-                            </TextBlock>
-                        </StackPanel>
+                        <TextBlock Text="点击下方各项可展开查看具体文件"
+                                   FontSize="11" Opacity="0.6" Margin="0,0,0,8"/>
+                        <ItemsControl ItemsSource="{Binding ReportSections}" Margin="0,0,0,16">
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate>
+                                    <Expander IsExpanded="{Binding IsExpanded, Mode=TwoWay}"
+                                              Margin="0,0,0,6">
+                                        <Expander.Header>
+                                            <TextBlock VerticalAlignment="Center">
+                                                <Run Text="{Binding Icon, Mode=OneWay}"/>
+                                                <Run Text=" "/>
+                                                <Run Text="{Binding Title, Mode=OneWay}"/>
+                                                <Run Text=": "/>
+                                                <Run Text="{Binding Count, Mode=OneWay}"/>
+                                                <Run Text=" 个文件"/>
+                                            </TextBlock>
+                                        </Expander.Header>
+                                        <ItemsControl ItemsSource="{Binding Files}" Margin="4,2">
+                                            <ItemsControl.ItemTemplate>
+                                                <DataTemplate>
+                                                    <TextBlock Text="{Binding}" FontSize="12"
+                                                               Margin="0,1" TextWrapping="Wrap"/>
+                                                </DataTemplate>
+                                            </ItemsControl.ItemTemplate>
+                                        </ItemsControl>
+                                    </Expander>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
 
                         <TextBlock Text="输出目录:" FontWeight="SemiBold" Margin="0,0,0,4"/>
                         <DockPanel Margin="0,0,0,24">
@@ -189,6 +222,7 @@
                                        Padding="16,4"/>
                         </StackPanel>
                     </StackPanel>
+                    </ScrollViewer>
                 </TabItem>
             </TabControl>
 

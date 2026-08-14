@@ -27,9 +27,6 @@ public partial class MainViewModel : ObservableObject
     private EncodingOption? _selectedEncoding;
 
     [ObservableProperty]
-    private string _newExtensionInput = "";
-
-    [ObservableProperty]
     private int _selectedTabIndex;
 
     [ObservableProperty]
@@ -67,6 +64,8 @@ public partial class MainViewModel : ObservableObject
 
     public ObservableCollection<EncodingOption> AvailableEncodings { get; }
     public ObservableCollection<ExtensionOption> ExtensionOptions { get; }
+    public ObservableCollection<ExtensionGroup> ExtensionGroups { get; } = new();
+    public ObservableCollection<ReportSection> ReportSections { get; } = new();
     public ObservableCollection<FileConversionItem> FileItems { get; } = new();
 
     /// <summary>Icon shown on the theme toggle button: the theme the button switches to.</summary>
@@ -81,8 +80,18 @@ public partial class MainViewModel : ObservableObject
     {
         AvailableEncodings = new ObservableCollection<EncodingOption>(EncodingOption.GetDefaultEncodings());
         SelectedEncoding = AvailableEncodings.First();
-        ExtensionOptions = new ObservableCollection<ExtensionOption>(
-            _extensionProfile.Extensions.Select(e => new ExtensionOption(e)));
+
+        // Build the grouped view; ExtensionOptions keeps a flat view of the very
+        // same option instances for snapshotting and validation.
+        ExtensionOptions = new ObservableCollection<ExtensionOption>();
+        foreach (var (name, extensions) in ExtensionProfile.GetDefaultGroups())
+        {
+            var options = extensions.Select(e => new ExtensionOption(e)).ToList();
+            foreach (var option in options)
+                ExtensionOptions.Add(option);
+            ExtensionGroups.Add(new ExtensionGroup(name, options));
+        }
+
         IsLightTheme = settingsStore.Load().IsLightTheme;
     }
 
@@ -245,6 +254,7 @@ public partial class MainViewModel : ObservableObject
                 Copied = summary.Copied + copyResult.Copied,
                 OutputPath = outputDir
             };
+            BuildReportSections(copyResult);
 
             SelectedTabIndex = 3;
             StatusText = $"转换完成: 成功 {summary.Success}, 跳过 {summary.Skipped}, 失败 {summary.Failed + copyResult.Failed}, 复制 {summary.Copied + copyResult.Copied}";
@@ -285,14 +295,62 @@ public partial class MainViewModel : ObservableObject
     }
 
     [RelayCommand]
-    private void AddExtension()
+    private void AddExtension(ExtensionGroup? group)
     {
-        if (_extensionProfile.AddExtension(NewExtensionInput))
+        if (group == null)
+            return;
+
+        var dialog = new AddExtensionDialog { Owner = Application.Current.MainWindow };
+        if (dialog.ShowDialog() != true || string.IsNullOrWhiteSpace(dialog.ExtensionInput))
+            return;
+
+        if (!TryAddExtension(group, dialog.ExtensionInput))
         {
-            var normalized = _extensionProfile.Extensions.Last();
-            ExtensionOptions.Add(new ExtensionOption(normalized));
-            NewExtensionInput = "";
+            MessageBox.Show(
+                $"扩展名 \"{dialog.ExtensionInput.Trim()}\" 无效或已存在。",
+                "添加扩展名", MessageBoxButton.OK, MessageBoxImage.Warning);
         }
+    }
+
+    /// <summary>Adds a custom extension to the profile and to the given group.</summary>
+    public bool TryAddExtension(ExtensionGroup group, string input)
+    {
+        if (!_extensionProfile.AddExtension(input, out var normalized))
+            return false;
+
+        var option = new ExtensionOption(normalized);
+        ExtensionOptions.Add(option);
+        group.Extensions.Add(option);
+        return true;
+    }
+
+    /// <summary>Builds the expandable report sections with concrete file lists.
+    /// Status semantics match the summary counters: "原样复制" items are Copied.</summary>
+    private void BuildReportSections(UnmatchedCopyResult copyResult)
+    {
+        static string Entry(FileConversionItem item)
+            => string.IsNullOrEmpty(item.StatusMessage)
+                ? item.RelativePath
+                : $"{item.RelativePath}（{item.StatusMessage}）";
+
+        var success = FileItems.Where(i => i.Status == ConversionStatus.Success)
+            .Select(Entry).ToList();
+        var skipped = FileItems.Where(i => i.Status == ConversionStatus.Skipped)
+            .Select(Entry).ToList();
+        var failed = FileItems.Where(i => i.Status == ConversionStatus.Failed)
+            .Select(Entry)
+            .Concat(copyResult.FailedFiles.Select(p => $"{p}（复制失败）"))
+            .ToList();
+        var copied = FileItems.Where(i => i.Status == ConversionStatus.Copied)
+            .Select(Entry)
+            .Concat(copyResult.CopiedFiles)
+            .ToList();
+
+        ReportSections.Clear();
+        ReportSections.Add(new ReportSection("✅", "成功转换", success));
+        ReportSections.Add(new ReportSection("⏭️", "跳过", skipped));
+        ReportSections.Add(new ReportSection("❌", "失败", failed));
+        ReportSections.Add(new ReportSection("📄", "复制", copied));
     }
 
     [RelayCommand]
@@ -316,6 +374,7 @@ public partial class MainViewModel : ObservableObject
     {
         FileItems.Clear();
         Summary = null;
+        ReportSections.Clear();
         ProgressValue = 0;
         CurrentFileName = "";
         SelectedTabIndex = 0;

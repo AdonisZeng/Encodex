@@ -20,6 +20,19 @@ public class ConversionSummary
     public string OutputPath { get; init; } = "";
 }
 
+/// <summary>Per-file outcome of copying unmatched files, for the detailed report.</summary>
+public class UnmatchedCopyResult
+{
+    /// <summary>Relative paths of files copied successfully.</summary>
+    public List<string> CopiedFiles { get; } = new();
+
+    /// <summary>Relative paths of files that could not be copied.</summary>
+    public List<string> FailedFiles { get; } = new();
+
+    public int Copied => CopiedFiles.Count;
+    public int Failed => FailedFiles.Count;
+}
+
 public class EncodingConverter
 {
     private const int BufferSize = 64 * 1024;
@@ -61,8 +74,9 @@ public class EncodingConverter
                 {
                     // Unknown encoding: nothing to convert, keep the file as-is.
                     CopyFile(sourcePath, outputPath);
-                    item.Status = ConversionStatus.Skipped;
-                    item.StatusMessage = "检测失败，原样复制";
+                    item.Status = ConversionStatus.Copied;
+                    // Preserve a scan-time reason (e.g. "二进制文件") when present.
+                    item.StatusMessage ??= "检测失败，原样复制";
                     copied++;
                     continue;
                 }
@@ -99,7 +113,7 @@ public class EncodingConverter
             {
                 // Source bytes that cannot be decoded: copying is safer than emitting garbage.
                 CopyFile(sourcePath, outputPath);
-                item.Status = ConversionStatus.Skipped;
+                item.Status = ConversionStatus.Copied;
                 item.StatusMessage = "解码失败，原样复制";
                 copied++;
             }
@@ -107,7 +121,7 @@ public class EncodingConverter
             {
                 // Characters the target encoding cannot represent: same treatment.
                 CopyFile(sourcePath, outputPath);
-                item.Status = ConversionStatus.Skipped;
+                item.Status = ConversionStatus.Copied;
                 item.StatusMessage = "目标编码无法表示部分字符，原样复制";
                 copied++;
             }
@@ -145,7 +159,7 @@ public class EncodingConverter
         };
     }
 
-    public async Task<(int Copied, int Failed)> CopyUnmatchedFilesAsync(
+    public async Task<UnmatchedCopyResult> CopyUnmatchedFilesAsync(
         string sourceDirectory,
         string outputDirectory,
         List<string> unmatchedFiles,
@@ -153,7 +167,7 @@ public class EncodingConverter
         int progressOffset = 0,
         CancellationToken cancellationToken = default)
     {
-        int copied = 0, failed = 0;
+        var result = new UnmatchedCopyResult();
 
         for (int i = 0; i < unmatchedFiles.Count; i++)
         {
@@ -174,16 +188,16 @@ public class EncodingConverter
             {
                 Directory.CreateDirectory(Path.GetDirectoryName(outputPath)!);
                 CopyFile(file, outputPath);
-                copied++;
+                result.CopiedFiles.Add(relativePath);
             }
             catch (Exception)
             {
                 // One unreadable/locked file must not abort the whole copy pass.
-                failed++;
+                result.FailedFiles.Add(relativePath);
             }
         }
 
-        return (copied, failed);
+        return result;
     }
 
     /// <summary>
