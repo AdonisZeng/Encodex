@@ -1,0 +1,55 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net481</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <ApplicationIcon>Ico\encodex.ico</ApplicationIcon>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Resource Include="Ico\encodex.ico" />
+    <Resource Include="Ico\encodex.png" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- FolderBrowserDialog: .NET Framework has no Microsoft.Win32.OpenFolderDialog.
+         Referenced directly (not via UseWindowsForms) so System.Windows.Forms is not
+         added to implicit usings, which would clash with WPF's Application type. -->
+    <Reference Include="System.Windows.Forms" />
+    <!-- HttpClient for the update checker -->
+    <Reference Include="System.Net.Http" />
+    <!-- XML parsing for update.xml -->
+    <Reference Include="System.Xml.Linq" />
+  </ItemGroup>
+
+  <!-- Builds Encodex.Updater.exe into the same output folder so the release zip
+       always ships the updater next to the main app. -->
+  <ItemGroup>
+    <ProjectReference Include="Encodex.Updater\Encodex.Updater.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="CommunityToolkit.Mvvm" Version="8.*" />
+    <!-- Provides CodePagesEncodingProvider on .NET Framework (registration is a no-op
+         there since GBK/Shift-JIS etc. are built in, but keeps parity with .NET 10). -->
+    <PackageReference Include="System.Text.Encoding.CodePages" Version="8.*" />
+    <PackageReference Include="System.Text.Json" Version="8.*" />
+    <PackageReference Include="Ude.NetStandard" Version="1.*" />
+    <PackageReference Include="WPF-UI" Version="4.*" />
+    <!-- Supplies .NET Framework reference assemblies when no Developer Pack is installed -->
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.*" PrivateAssets="all" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Remove="Encodex.Tests\**" />
+    <None Remove="Encodex.Tests\**" />
+    <Compile Remove="Encodex.Updater\**" />
+    <None Remove="Encodex.Updater\**" />
+  </ItemGroup>
+
+</Project>

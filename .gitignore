@@ -1,0 +1,15 @@
+# Build results
+bin/
+obj/
+dist/
+
+# Visual Studio
+.vs/
+*.user
+*.suo
+
+# Qoder IDE generated content
+.qoder/
+
+# Updater self-replacement leftovers
+*.upd-old
