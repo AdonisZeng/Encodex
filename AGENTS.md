@@ -76,6 +76,12 @@ Encodex.slnx
 
 - 运行中的 exe 无法覆盖自身，故替换必须由独立的 Updater 进程完成；zip 必须整目录包含 exe、全部依赖 DLL、`Encodex.exe.config` 与 `Encodex.Updater.exe`。
 - **参数引号陷阱**：`AppContext.BaseDirectory` 以 `\` 结尾，直接拼 `"..."` 会让尾部 `\"` 被命令行解析器当作转义引号导致 Updater 收到损坏参数；启动 Updater 必须走 `AppUpdateService.QuoteWindowsArgument`（有回归测试）。
+- **旧版升级死锁**：v1.0.0.x 及更早的主程序传参未做转义（同样的引号陷阱），其自动更新必然失败，且崩溃发生在旧版 Updater 内——**旧版用户无法通过自动更新自愈，只能手动下载最新 zip 解压覆盖一次**。新版 Updater 的 `ResolveInstallDirectory` 会对带引号参数消毒（`Trim('"')`）并回退到自身所在目录兜底，但兜底只对新 Updater 生效。<｜end▁of▁thinking｜>
+
+<｜｜DSML｜｜tool_calls>
+<｜｜DSML｜｜invoke name="edit_file">
+<｜｜DSML｜｜parameter name="new_string" string="true">- **参数引号陷阱**：`AppContext.BaseDirectory` 以 `\` 结尾，直接拼 `"..."` 会让尾部 `\"` 被命令行解析器当作转义引号导致 Updater 收到损坏参数；启动 Updater 必须走 `AppUpdateService.QuoteWindowsArgument`（有回归测试）。
+- **旧版升级死锁**：v1.0.0.x 及更早的主程序传参未做转义（同样的引号陷阱），其自动更新必然失败，且崩溃发生在旧版 Updater 内——**旧版用户无法通过自动更新自愈，只能手动下载最新 zip 解压覆盖一次**。新版 Updater 的 `ResolveInstallDirectory` 会对带引号参数消毒（`Trim('"')`）并回退到自身所在目录兜底，但兜底只对新 Updater 生效。
 - 安装目录位于 `Program Files` 下时覆盖需要管理员权限；建议引导用户解压到普通目录。
 - 国内访问 `raw.githubusercontent.com` 可能不稳定，必要时可在 `DefaultManifestUrl` 改用镜像地址。
 

@@ -13,6 +13,7 @@ namespace Encodex.Updater;
 internal static class Program
 {
     private const string UpdaterBackupExtension = ".upd-old";
+    private const string MainAppFileName = "Encodex.exe";
 
     /// <summary>Zone.Identifier ADS that Windows attaches to downloaded files.</summary>
     private const string ZoneIdentifierStream = ":Zone.Identifier";
@@ -30,12 +31,17 @@ internal static class Program
 
         Log($"Updater started: pid={args[0]}, zip={args[1]}, dir={args[2]}");
 
-        var installDirectory = args[2];
-        var appPath = Path.Combine(installDirectory, "Encodex.exe");
-
+        // All path handling happens inside the try block: a malformed argument
+        // (see ResolveInstallDirectory) must surface as a dialog plus log, never
+        // as an unhandled exception that leaves the user with a dead app.
+        string? appPath = null;
         try
         {
-            Run(int.Parse(args[0]), args[1], installDirectory);
+            var installDirectory = ResolveInstallDirectory(args[2]);
+            var zipPath = ResolveZipPath(args[1]);
+            appPath = Path.Combine(installDirectory, MainAppFileName);
+
+            Run(int.Parse(args[0]), zipPath, installDirectory);
             Log("Update finished successfully.");
             return 0;
         }
@@ -46,7 +52,8 @@ internal static class Program
 
             // Never leave the user without a running app: even after a failed
             // (possibly partial) replacement the previous files usually still work.
-            TryStart(appPath);
+            if (appPath != null)
+                TryStart(appPath);
             return 1;
         }
     }
@@ -95,7 +102,42 @@ internal static class Program
         }
 
         Log("Relaunching Encodex.exe");
-        TryStart(appPath: Path.Combine(installDirectory, "Encodex.exe"));
+        TryStart(appPath: Path.Combine(installDirectory, MainAppFileName));
+    }
+
+    /// <summary>
+    /// Resolves the install directory from the raw command-line argument. Old Encodex
+    /// versions (≤ 1.0.0.x) and Windows PowerShell 5.1 quote a directory that ends with
+    /// '\' without doubling the trailing backslash, so the parsed argument arrives
+    /// wrapped in a stray quote ("C:\app\" → "C:\app""). Stray quotes are stripped and,
+    /// when the result is not a real directory, the updater falls back to its own
+    /// directory — the updater always lives next to the main app, so this is the correct
+    /// install directory in every supported deployment.
+    /// </summary>
+    internal static string ResolveInstallDirectory(string rawArgument)
+    {
+        var candidate = SanitizePathArgument(rawArgument);
+
+        if (string.IsNullOrEmpty(candidate) || !Directory.Exists(candidate))
+        {
+            Log($"安装目录无效（{rawArgument}），改用更新器所在目录。");
+            return AppDomain.CurrentDomain.BaseDirectory;
+        }
+
+        return Path.GetFullPath(candidate);
+    }
+
+    /// <summary>Removes stray quotes left by broken command-line escaping.</summary>
+    internal static string? SanitizePathArgument(string? argument) =>
+        argument is null or "" ? null : argument.Trim('"');
+
+    /// <summary>Validates the zip path, stripping stray quotes like ResolveInstallDirectory.</summary>
+    private static string ResolveZipPath(string rawArgument)
+    {
+        var candidate = SanitizePathArgument(rawArgument);
+        if (string.IsNullOrEmpty(candidate) || !File.Exists(candidate))
+            throw new ArgumentException($"更新包不存在或路径无效: {rawArgument}");
+        return candidate!;
     }
 
     /// <summary>

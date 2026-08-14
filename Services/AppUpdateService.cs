@@ -148,7 +148,11 @@ public class AppUpdateService
         });
         _ = Process.Start(new ProcessStartInfo
         {
-            FileName = updaterPath,
+            // .NET Framework does not quote the FileName when building the command
+            // line, so an install directory containing spaces ("C:\Program Files\...")
+            // would be split at the first space and the updater would never start.
+            // QuoteWindowsArgument quotes it when needed and leaves it alone otherwise.
+            FileName = QuoteWindowsArgument(updaterPath),
             Arguments = arguments,
             UseShellExecute = false
         }) ?? throw new UpdateException(string.Format(Res.Upd_LaunchFailed, UpdaterFileName));
