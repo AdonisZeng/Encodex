@@ -140,6 +140,30 @@ public class AppUpdateService
         }));
     }
 
+    /// <summary>
+    /// Checks for leftovers of a failed update attempt: an updater that died while
+    /// self-replacing leaves the extracted replacement next to the running exe.
+    /// Returns a user-presentable message, or null when there is no trace of failure.
+    /// </summary>
+    public static string? DetectFailedUpdate()
+    {
+        try
+        {
+            var leftover = Path.Combine(AppContext.BaseDirectory, UpdaterFileName + ".new");
+            if (File.Exists(leftover))
+            {
+                File.Delete(leftover);
+                return "上一次自动更新未能完成安装（更新器在替换文件时中断），当前可能仍是旧版本。\n请再次点击 🔄 检查更新重试，或从 GitHub Releases 手动下载最新版本。";
+            }
+        }
+        catch
+        {
+            // Diagnostics only — must never break startup.
+        }
+
+        return null;
+    }
+
     private static string? ReadElement(XElement? root, string name) =>
         root?.Element(name)?.Value.Trim();
 

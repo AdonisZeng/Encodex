@@ -17,6 +17,9 @@
   <ItemGroup>
     <Reference Include="System.IO.Compression" />
     <Reference Include="System.IO.Compression.FileSystem" />
+    <!-- MessageBox: the updater runs without a console window, so failures
+         must surface as a dialog instead of disappearing into stderr. -->
+    <Reference Include="PresentationFramework" />
   </ItemGroup>
 
 </Project>

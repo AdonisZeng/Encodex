@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.IO.Compression;
+using System.Windows;
 
 namespace Encodex.Updater;
 
@@ -13,6 +14,12 @@ internal static class Program
 {
     private const string UpdaterBackupExtension = ".upd-old";
 
+    /// <summary>Zone.Identifier ADS that Windows attaches to downloaded files.</summary>
+    private const string ZoneIdentifierStream = ":Zone.Identifier";
+
+    private static readonly string LogPath =
+        Path.Combine(Path.GetTempPath(), "Encodex-Updater.log");
+
     private static int Main(string[] args)
     {
         if (args.Length < 3)
@@ -21,14 +28,25 @@ internal static class Program
             return 1;
         }
 
+        Log($"Updater started: pid={args[0]}, zip={args[1]}, dir={args[2]}");
+
+        var installDirectory = args[2];
+        var appPath = Path.Combine(installDirectory, "Encodex.exe");
+
         try
         {
-            Run(int.Parse(args[0]), args[1], args[2]);
+            Run(int.Parse(args[0]), args[1], installDirectory);
+            Log("Update finished successfully.");
             return 0;
         }
         catch (Exception ex)
         {
-            Console.Error.WriteLine($"Update failed: {ex.Message}");
+            Log($"Update failed: {ex}");
+            ShowError(ex);
+
+            // Never leave the user without a running app: even after a failed
+            // (possibly partial) replacement the previous files usually still work.
+            TryStart(appPath);
             return 1;
         }
     }
@@ -51,26 +69,40 @@ internal static class Program
         {
             var backup = updaterPath + UpdaterBackupExtension;
             if (File.Exists(updaterPath))
-                File.Move(updaterPath, backup);
-            File.Move(extractedUpdater, updaterPath);
-            File.Delete(extractedUpdater);
+                Retry(() => File.Move(updaterPath, backup), $"备份旧更新器 {updaterPath}");
+            Retry(() => File.Move(extractedUpdater, updaterPath), $"替换更新器 {extractedUpdater}");
+            TryDelete(extractedUpdater);
         }
 
-        Process.Start(Path.Combine(installDirectory, "Encodex.exe"));
+        Log("Relaunching Encodex.exe");
+        TryStart(appPath: Path.Combine(installDirectory, "Encodex.exe"));
     }
 
+    /// <summary>
+    /// Blocks until the main process has really exited. Polls instead of relying on a
+    /// single WaitForExit timeout: extracting while the app still holds file locks is
+    /// the main cause of failed updates.
+    /// </summary>
     private static void WaitForProcessExit(int processId)
     {
-        try
+        for (var attempt = 0; attempt < 240; attempt++) // up to ~60 seconds
         {
-            // Give the main process a moment to shut down; WaitForExit then blocks
-            // until all its file locks are released.
-            Process.GetProcessById(processId).WaitForExit(10_000);
+            try
+            {
+                using var process = Process.GetProcessById(processId);
+                if (process.HasExited)
+                    break;
+            }
+            catch (ArgumentException)
+            {
+                break; // Process already exited.
+            }
+
+            Thread.Sleep(250);
         }
-        catch (ArgumentException)
-        {
-            // Process already exited.
-        }
+
+        // Give the file system a moment to release the process' file handles.
+        Thread.Sleep(500);
     }
 
     /// <summary>
@@ -112,11 +144,65 @@ internal static class Program
                     updaterDestination = destination;
                 }
 
-                entry.ExtractToFile(destination, overwrite: true);
+                Retry(() => entry.ExtractToFile(destination, overwrite: true), $"解压 {entry.FullName}");
+                UnblockFile(destination);
             }
         }
 
         return updaterDestination;
+    }
+
+    /// <summary>
+    /// Retries a file operation on IOException/UnauthorizedAccessException.
+    /// Transient locks (antivirus scans, search indexers, handle release delays)
+    /// previously aborted the whole update silently.
+    /// </summary>
+    private static void Retry(Action operation, string description)
+    {
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                operation();
+                return;
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                if (attempt >= 5)
+                    throw new IOException($"{description} 失败（已重试 5 次），文件可能被占用或没有写入权限。", ex);
+
+                Log($"{description}: 第 {attempt} 次失败（{ex.Message}），{attempt * 500}ms 后重试");
+                Thread.Sleep(attempt * 500);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Removes the Mark-of-the-Web so replaced files are not treated as
+    /// "downloaded and untrusted" (SmartScreen prompts, blocked execution).
+    /// </summary>
+    private static void UnblockFile(string path)
+    {
+        try { File.Delete(path + ZoneIdentifierStream); }
+        catch { /* No ADS present or not deletable: harmless. */ }
+    }
+
+    private static void TryDelete(string path)
+    {
+        try { File.Delete(path); }
+        catch { /* Best effort only. */ }
+    }
+
+    private static void TryStart(string appPath)
+    {
+        try
+        {
+            Process.Start(appPath);
+        }
+        catch (Exception ex)
+        {
+            Log($"无法启动 {appPath}: {ex.Message}");
+        }
     }
 
     private static void DeleteFilesWithExtension(string directory, string extension)
@@ -125,9 +211,40 @@ internal static class Program
             return;
 
         foreach (var file in Directory.GetFiles(directory, "*" + extension))
+            TryDelete(file);
+    }
+
+    private static void Log(string message)
+    {
+        try
         {
-            try { File.Delete(file); }
-            catch { /* Best effort only. */ }
+            File.AppendAllText(LogPath, $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {message}{Environment.NewLine}");
+        }
+        catch
+        {
+            // Logging must never break the update itself.
+        }
+    }
+
+    /// <summary>
+    /// The updater runs without a console window, so errors must surface as a
+    /// message box instead of disappearing into stderr.
+    /// </summary>
+    private static void ShowError(Exception ex)
+    {
+        try
+        {
+            MessageBox.Show(
+                $"自动更新失败：{ex.Message}\n\n" +
+                $"详细日志：{LogPath}\n" +
+                "Encodex 将按当前版本重新启动。你可以从 GitHub Releases 手动下载最新版本并解压覆盖安装目录。",
+                "Encodex 更新",
+                MessageBoxButton.OK,
+                MessageBoxImage.Warning);
+        }
+        catch
+        {
+            // Nothing else we can do.
         }
     }
 }

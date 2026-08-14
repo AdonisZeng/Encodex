@@ -14,6 +14,13 @@ namespace Encodex
         {
             InitializeComponent();
             DataContext = new MainViewModel();
+
+            // Surface a failed previous update (updater died mid-replacement) once,
+            // after the window is visible, so the user knows why the version is stale.
+            var failedUpdate = AppUpdateService.DetectFailedUpdate();
+            if (failedUpdate != null)
+                Loaded += (_, _) => System.Windows.MessageBox.Show(
+                    failedUpdate, "Encodex 更新", System.Windows.MessageBoxButton.OK, System.Windows.MessageBoxImage.Warning);
         }
 
         private void ThemeToggleButton_Click(object sender, RoutedEventArgs e)
