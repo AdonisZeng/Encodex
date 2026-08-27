@@ -1,4 +1,4 @@
-# AGENTS.md
+# CLAUDE.md
 
 本文档面向 AI 编码助手与新加入的开发者，描述 Encodex 项目的整体情况与版本发布流程。
 

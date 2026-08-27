@@ -95,7 +95,8 @@ public class AppUpdateService
     /// Downloads the release zip to a temp file and verifies its SHA-256
     /// (when the manifest provides one).
     /// </summary>
-    public async Task<string> DownloadAsync(UpdateInfo info, IProgress<DownloadProgress>? progress = null)
+    public async Task<string> DownloadAsync(UpdateInfo info, IProgress<DownloadProgress>? progress = null,
+        CancellationToken cancellationToken = default)
     {
         var tempZip = Path.Combine(
             Path.GetTempPath(), $"Encodex-update-{info.Version}.zip");
@@ -104,11 +105,18 @@ public class AppUpdateService
 
         try
         {
-            using var response = await _http.GetAsync(info.DownloadUrl, HttpCompletionOption.ResponseHeadersRead);
+            using var response = await _http.GetAsync(
+                info.DownloadUrl, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
             response.EnsureSuccessStatusCode();
             var total = response.Content.Headers.ContentLength;
             using var fileStream = File.Create(tempZip);
             await response.Content.CopyToAsync(new ProgressStream(fileStream, total, progress));
+        }
+        catch (OperationCanceledException)
+        {
+            // User-initiated cancellation is not a download failure.
+            TryDeleteFile(tempZip);
+            throw;
         }
         catch (Exception ex)
         {

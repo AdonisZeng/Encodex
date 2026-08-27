@@ -1,4 +1,4 @@
-﻿using System.IO;
+using System.IO;
 using System.Windows;
 using Encodex.Resources;
 using Encodex.Services;
@@ -22,19 +22,28 @@ namespace Encodex
                     failedUpdate, Res.Upd_DialogTitle, System.Windows.MessageBoxButton.OK, System.Windows.MessageBoxImage.Warning);
         }
 
-        /// <summary>Drop a folder anywhere on the window to select it as the source.</summary>
+        /// <summary>Drop a folder anywhere on the window to select it as the source.
+        /// Dropping a file selects its containing folder instead.</summary>
         private void Window_Drop(object sender, DragEventArgs e)
         {
             if (DataContext is not MainViewModel vm)
                 return;
 
+            string? droppedFolder = null;
             if (e.Data.GetDataPresent(DataFormats.FileDrop) &&
                 e.Data.GetData(DataFormats.FileDrop) is string[] paths &&
-                paths.Length > 0 &&
-                Directory.Exists(paths[0]))
+                paths.Length > 0)
             {
-                vm.SourceFolderPath = paths[0];
-                vm.StatusText = string.Format(Res.VM_Selected, paths[0]);
+                if (Directory.Exists(paths[0]))
+                    droppedFolder = paths[0];
+                else if (File.Exists(paths[0]))
+                    droppedFolder = Path.GetDirectoryName(paths[0]);
+            }
+
+            if (droppedFolder != null)
+            {
+                vm.SourceFolderPath = droppedFolder;
+                vm.StatusText = string.Format(Res.VM_Selected, droppedFolder);
             }
         }
     }

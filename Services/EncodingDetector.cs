@@ -17,6 +17,11 @@ public class EncodingDetector
     // so there is no reason to load the whole file into memory just to detect encoding.
     private const int MaxDetectionBytes = 64 * 1024;
 
+    /// <summary>Detected UTF-8 display names, mirroring the target dropdown in
+    /// EncodingOption so the two lists use the same wording.</summary>
+    public const string Utf8NoBomName = "UTF-8 (无 BOM)";
+    public const string Utf8BomName = "UTF-8 (带 BOM)";
+
     public DetectionResult Detect(string filePath)
     {
         using var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
@@ -59,7 +64,12 @@ public class EncodingDetector
             try
             {
                 var encoding = Encoding.GetEncoding(detector.Charset);
-                return new DetectionResult { Encoding = encoding, EncodingName = detector.Charset };
+                // Ude reports BOM-less UTF-8 as "UTF-8"; normalize it to the display
+                // name that distinguishes it from the BOM'd variant.
+                var name = string.Equals(detector.Charset, "utf-8", StringComparison.OrdinalIgnoreCase)
+                    ? Utf8NoBomName
+                    : detector.Charset;
+                return new DetectionResult { Encoding = encoding, EncodingName = name };
             }
             catch
             {
@@ -68,6 +78,28 @@ public class EncodingDetector
         }
 
         return new DetectionResult();
+    }
+
+    /// <summary>
+    /// Resolves a detection/candidate encoding name (including the two BOM-aware
+    /// UTF-8 display names) to an encoding; returns null when unrecognizable.
+    /// </summary>
+    public static Encoding? ResolveName(string? name)
+    {
+        if (string.IsNullOrEmpty(name))
+            return null;
+        if (name == Utf8NoBomName)
+            return new UTF8Encoding(false);
+        if (name == Utf8BomName)
+            return new UTF8Encoding(true);
+        try
+        {
+            return Encoding.GetEncoding(name);
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     /// <summary>.NET Framework has no Stream.ReadExactly: read until the buffer is full.</summary>
@@ -90,7 +122,7 @@ public class EncodingDetector
         if (bytes.Length >= 4 && bytes[0] == 0xFF && bytes[1] == 0xFE && bytes[2] == 0x00 && bytes[3] == 0x00)
             return (new UTF32Encoding(bigEndian: false, byteOrderMark: true), "utf-32LE");
         if (bytes.Length >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF)
-            return (new UTF8Encoding(true), "utf-8");
+            return (new UTF8Encoding(true), Utf8BomName);
         if (bytes.Length >= 2 && bytes[0] == 0xFF && bytes[1] == 0xFE)
             return (new UnicodeEncoding(false, true), "utf-16LE");
         if (bytes.Length >= 2 && bytes[0] == 0xFE && bytes[1] == 0xFF)

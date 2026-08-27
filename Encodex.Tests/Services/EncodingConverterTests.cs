@@ -55,6 +55,68 @@ public class EncodingConverterTests : IDisposable
     }
 
     [Fact]
+    public async Task ConvertAsync_Utf8WithBomName_ToGBK_BomNotLeaked()
+    {
+        var utf8 = new UTF8Encoding(true);
+        var filePath = Path.Combine(_sourceDir, "test.txt");
+        var expectedText = "你好世界";
+        File.WriteAllBytes(filePath, utf8.GetPreamble().Concat(utf8.GetBytes(expectedText)).ToArray());
+
+        var item = new FileConversionItem
+        {
+            RelativePath = "test.txt",
+            FileName = "test.txt",
+            FileSize = new FileInfo(filePath).Length,
+            DetectedEncoding = EncodingDetector.Utf8BomName,
+            TargetEncoding = "GBK",
+            IsSelected = true
+        };
+
+        var converter = new EncodingConverter();
+        var summary = await converter.ConvertAsync(
+            new List<FileConversionItem> { item },
+            _sourceDir, _outputDir, Encoding.GetEncoding("GBK"));
+
+        // U+FEFF is not representable in GBK: a leaked BOM would fail the strict
+        // encode and fall back to "Copied" instead of a successful conversion.
+        var content = Encoding.GetEncoding("GBK").GetString(File.ReadAllBytes(Path.Combine(_outputDir, "test.txt")));
+        Assert.Equal(expectedText, content);
+        Assert.Equal(ConversionStatus.Success, item.Status);
+        Assert.Equal(1, summary.Success);
+    }
+
+    [Fact]
+    public async Task ConvertAsync_Utf8NoBomName_ToUTF8WithBom_AddsBom()
+    {
+        var utf8 = new UTF8Encoding(false);
+        var filePath = Path.Combine(_sourceDir, "test.txt");
+        var expectedText = "你好世界";
+        File.WriteAllBytes(filePath, utf8.GetBytes(expectedText));
+
+        var item = new FileConversionItem
+        {
+            RelativePath = "test.txt",
+            FileName = "test.txt",
+            FileSize = new FileInfo(filePath).Length,
+            DetectedEncoding = EncodingDetector.Utf8NoBomName,
+            TargetEncoding = "UTF-8 (带 BOM)",
+            IsSelected = true
+        };
+
+        var converter = new EncodingConverter();
+        await converter.ConvertAsync(
+            new List<FileConversionItem> { item },
+            _sourceDir, _outputDir, new UTF8Encoding(true));
+
+        var bytes = File.ReadAllBytes(Path.Combine(_outputDir, "test.txt"));
+        var preamble = new UTF8Encoding(true).GetPreamble();
+        Assert.Equal(preamble, bytes.Take(preamble.Length).ToArray());
+        var content = new UTF8Encoding(false).GetString(bytes.Skip(preamble.Length).ToArray());
+        Assert.Equal(expectedText, content);
+        Assert.Equal(ConversionStatus.Success, item.Status);
+    }
+
+    [Fact]
     public async Task ConvertAsync_UTF8ToGBK_ContentIsCorrect()
     {
         var utf8 = new UTF8Encoding(false);

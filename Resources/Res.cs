@@ -52,6 +52,7 @@ public static class Res
     public static string Ui_AddExtPlaceholder => Get("Ui_AddExtPlaceholder");
     public static string Ui_Ok => Get("Ui_Ok");
     public static string Ui_Cancel => Get("Ui_Cancel");
+    public static string Ui_CancelUpdate => Get("Ui_CancelUpdate");
 
     // --- MainViewModel ---
     public static string VM_SelectFolder => Get("VM_SelectFolder");
@@ -87,12 +88,17 @@ public static class Res
     public static string VM_ReadyToUpdateTitle => Get("VM_ReadyToUpdateTitle");
     public static string VM_ApplyingUpdate => Get("VM_ApplyingUpdate");
     public static string VM_UpdateFailed => Get("VM_UpdateFailed");
+    public static string VM_ConvertFailed => Get("VM_ConvertFailed");
+    public static string VM_FolderDialogDescription => Get("VM_FolderDialogDescription");
+    public static string VM_CustomGroup => Get("VM_CustomGroup");
+    public static string VM_MandatoryUpdate => Get("VM_MandatoryUpdate");
 
     // --- EncodingConverter status messages ---
     public static string Conv_UnknownCopy => Get("Conv_UnknownCopy");
     public static string Conv_SameCopy => Get("Conv_SameCopy");
     public static string Conv_DecodeFailed => Get("Conv_DecodeFailed");
     public static string Conv_EncodeFailed => Get("Conv_EncodeFailed");
+    public static string Conv_BackupFailed => Get("Conv_BackupFailed");
 
     // --- AppUpdateService ---
     public static string Upd_NetworkError => Get("Upd_NetworkError");
@@ -110,6 +116,7 @@ public static class Res
     public static string Prev_Title => Get("Prev_Title");
     public static string Prev_File => Get("Prev_File");
     public static string Prev_UnknownEncoding => Get("Prev_UnknownEncoding");
+    public static string Prev_Unknown => Get("Prev_Unknown");
     public static string Prev_EncodingInfo => Get("Prev_EncodingInfo");
     public static string Prev_ReadFailed => Get("Prev_ReadFailed");
     public static string Prev_NoPreview => Get("Prev_NoPreview");

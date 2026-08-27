@@ -43,6 +43,7 @@
   <data name="Ui_AddExtPlaceholder" xml:space="preserve"><value>例如: .log</value></data>
   <data name="Ui_Ok" xml:space="preserve"><value>确定</value></data>
   <data name="Ui_Cancel" xml:space="preserve"><value>取消</value></data>
+  <data name="Ui_CancelUpdate" xml:space="preserve"><value>取消下载</value></data>
   <data name="VM_SelectFolder" xml:space="preserve"><value>请选择项目文件夹</value></data>
   <data name="VM_SelectValidFolder" xml:space="preserve"><value>请选择有效的文件夹</value></data>
   <data name="VM_SelectExtension" xml:space="preserve"><value>请至少勾选一个文件扩展名</value></data>
@@ -80,10 +81,17 @@
   <data name="VM_ReadyToUpdateTitle" xml:space="preserve"><value>准备更新</value></data>
   <data name="VM_ApplyingUpdate" xml:space="preserve"><value>正在应用更新...</value></data>
   <data name="VM_UpdateFailed" xml:space="preserve"><value>检查更新失败: {0}</value></data>
+  <data name="VM_ConvertFailed" xml:space="preserve"><value>转换失败: {0}</value></data>
+  <data name="VM_FolderDialogDescription" xml:space="preserve"><value>选择项目文件夹</value></data>
+  <data name="VM_CustomGroup" xml:space="preserve"><value>自定义</value></data>
+  <data name="VM_MandatoryUpdate" xml:space="preserve"><value>发现强制更新版本（当前 v{1} → 最新 v{0}）。
+
+点击确定立即开始下载并安装。</value></data>
   <data name="Conv_UnknownCopy" xml:space="preserve"><value>检测失败，原样复制</value></data>
   <data name="Conv_SameCopy" xml:space="preserve"><value>编码相同，原样复制</value></data>
   <data name="Conv_DecodeFailed" xml:space="preserve"><value>解码失败，原样复制</value></data>
   <data name="Conv_EncodeFailed" xml:space="preserve"><value>目标编码无法表示部分字符，原样复制</value></data>
+  <data name="Conv_BackupFailed" xml:space="preserve"><value>备份失败，已跳过该文件</value></data>
   <data name="Upd_NetworkError" xml:space="preserve"><value>无法获取版本信息，请检查网络连接。</value></data>
   <data name="Upd_MissingVersion" xml:space="preserve"><value>update.xml 缺少 version 节点</value></data>
   <data name="Upd_MissingUrl" xml:space="preserve"><value>update.xml 缺少 url 节点</value></data>
@@ -98,6 +106,7 @@
   <data name="Prev_Title" xml:space="preserve"><value>转换预览 - {0}</value></data>
   <data name="Prev_File" xml:space="preserve"><value>文件: {0}</value></data>
   <data name="Prev_UnknownEncoding" xml:space="preserve"><value>检测编码: {0}（无法识别，转换时该文件将被原样复制）</value></data>
+  <data name="Prev_Unknown" xml:space="preserve"><value>未知</value></data>
   <data name="Prev_EncodingInfo" xml:space="preserve"><value>检测编码: {0}  →  目标编码: {1}</value></data>
   <data name="Prev_ReadFailed" xml:space="preserve"><value>无法读取文件: {0}</value></data>
   <data name="Prev_NoPreview" xml:space="preserve"><value>无法预览：源编码未知。</value></data>

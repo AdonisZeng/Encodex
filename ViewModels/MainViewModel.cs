@@ -20,12 +20,14 @@ public partial class MainViewModel : ObservableObject
     private readonly AppUpdateService _updateService = new();
     private readonly AppSettingsStore _settingsStore;
     private CancellationTokenSource? _cts;
+    private CancellationTokenSource? _updateCts;
     private List<string> _unmatchedFiles = new();
 
     /// <summary>Candidates for manually correcting a file's detected encoding.</summary>
     public string[] AvailableDetectedEncodings { get; } =
     {
-        "utf-8", "utf-16LE", "utf-16BE", "utf-32LE", "utf-32BE",
+        EncodingDetector.Utf8NoBomName, EncodingDetector.Utf8BomName,
+        "utf-16LE", "utf-16BE", "utf-32LE", "utf-32BE",
         "GBK", "GB2312", "GB18030", "Big5", "shift_jis", "euc-kr",
         "us-ascii", "iso-8859-1"
     };
@@ -46,13 +48,20 @@ public partial class MainViewModel : ObservableObject
 
     [ObservableProperty]
     [NotifyCanExecuteChangedFor(nameof(ScanCommand))]
-    [NotifyCanExecuteChangedFor(nameof(ConvertCommand))]
-    [NotifyCanExecuteChangedFor(nameof(CancelCommand))]
-    private bool _isConverting;
+    [NotifyCanExecuteChangedFor(nameof(ResetCommand))]
+    private bool _isScanning;
+
+    [ObservableProperty]
+    [NotifyCanExecuteChangedFor(nameof(CheckForUpdatesCommand))]
+    [NotifyPropertyChangedFor(nameof(UpdateButtonText))]
+    private bool _isDownloading;
 
     [ObservableProperty]
     [NotifyCanExecuteChangedFor(nameof(ScanCommand))]
-    private bool _isScanning;
+    [NotifyCanExecuteChangedFor(nameof(ConvertCommand))]
+    [NotifyCanExecuteChangedFor(nameof(CancelCommand))]
+    [NotifyCanExecuteChangedFor(nameof(ResetCommand))]
+    private bool _isConverting;
 
     [ObservableProperty]
     [NotifyCanExecuteChangedFor(nameof(CheckForUpdatesCommand))]
@@ -90,6 +99,9 @@ public partial class MainViewModel : ObservableObject
 
     /// <summary>Icon shown on the theme toggle button: the theme the button switches to.</summary>
     public string ThemeIcon => IsLightTheme ? "🌙" : "☀️";
+
+    /// <summary>Update button label: turns into a cancel action while a download runs.</summary>
+    public string UpdateButtonText => IsDownloading ? Res.Ui_CancelUpdate : Res.Ui_CheckUpdate;
 
     /// <summary>Header text above the file list ("已扫描 N 个文件").</summary>
     public string ScannedCountText => string.Format(Res.Ui_ScannedCount, FileItems.Count);
@@ -129,7 +141,9 @@ public partial class MainViewModel : ObservableObject
     public bool CanScan => !string.IsNullOrEmpty(SourceFolderPath) && !IsConverting && !IsScanning;
     public bool CanConvert => FileItems.Count > 0 && !IsConverting;
     public bool CanCancel => IsConverting;
-    public bool CanCheckForUpdates => !IsCheckingUpdates;
+    public bool CanReset => !IsScanning && !IsConverting;
+    // While a download is running the update button doubles as "cancel download".
+    public bool CanCheckForUpdates => !IsCheckingUpdates || IsDownloading;
     public bool CanPreview => SelectedFileItem != null;
 
     /// <summary>Restores the persisted folder / encoding / extension selection.</summary>
@@ -146,6 +160,24 @@ public partial class MainViewModel : ObservableObject
                 SelectedEncoding = match;
         }
 
+        // Re-create persisted custom extensions first so their saved check states
+        // (in SelectedExtensions) can match an actual option below.
+        var defaults = new HashSet<string>(ExtensionProfile.GetDefaultExtensions());
+        if (settings.CustomExtensions.Count > 0)
+        {
+            var customGroup = new ExtensionGroup(Res.VM_CustomGroup, Array.Empty<ExtensionOption>());
+            foreach (var ext in settings.CustomExtensions)
+            {
+                if (defaults.Contains(ext) || ExtensionOptions.Any(o => o.Extension == ext))
+                    continue;
+                var option = new ExtensionOption(ext);
+                ExtensionOptions.Add(option);
+                customGroup.Extensions.Add(option);
+            }
+            if (customGroup.Extensions.Count > 0)
+                ExtensionGroups.Add(customGroup);
+        }
+
         // Only apply the saved selection when it was actually persisted (an empty
         // list means "not saved yet" and must not uncheck everything).
         if (settings.SelectedExtensions.Count > 0)
@@ -158,12 +190,16 @@ public partial class MainViewModel : ObservableObject
     /// <summary>Persists the current configuration so the next launch restores it.</summary>
     private void SaveSettings()
     {
+        // Anything outside the default set came from the user and must survive restarts.
+        var defaults = new HashSet<string>(ExtensionProfile.GetDefaultExtensions());
         _settingsStore.Save(new AppSettings
         {
             IsLightTheme = IsLightTheme,
             SourceFolderPath = SourceFolderPath,
             SelectedEncoding = SelectedEncoding?.DisplayName,
-            SelectedExtensions = ExtensionOptions.Where(o => o.IsSelected).Select(o => o.Extension).ToList()
+            SelectedExtensions = ExtensionOptions.Where(o => o.IsSelected).Select(o => o.Extension).ToList(),
+            CustomExtensions = ExtensionOptions.Where(o => !defaults.Contains(o.Extension))
+                .Select(o => o.Extension).ToList()
         });
     }
 
@@ -261,35 +297,46 @@ public partial class MainViewModel : ObservableObject
 
         try
         {
+            // Snapshot before any await: the user can change the mode while running.
+            var overwriteInPlace = IsOverwriteInPlace;
             var sourceFolderName = Path.GetFileName(SourceFolderPath);
             var encodingName = GetEncodingFolderName(SelectedEncoding!.Encoding);
 
-            if (IsOverwriteInPlace)
+            if (overwriteInPlace)
             {
                 // In-place mode rewrites the source files; the backup lives in %TEMP%.
                 outputDir = SourceFolderPath;
             }
             else
             {
-                outputDir = Path.Combine(
-                    Path.GetDirectoryName(SourceFolderPath)!,
-                    $"{sourceFolderName}_{encodingName}");
-
-                // Handle name collision
-                int suffix = 2;
-                while (Directory.Exists(outputDir))
+                // A drive root ("C:\", "D:") has no parent directory: GetDirectoryName
+                // returns null there, so place the output inside the source folder instead.
+                var parentDir = Path.GetDirectoryName(SourceFolderPath);
+                if (string.IsNullOrEmpty(parentDir) || string.IsNullOrEmpty(sourceFolderName))
                 {
-                    outputDir = Path.Combine(
-                        Path.GetDirectoryName(SourceFolderPath)!,
-                        $"{sourceFolderName}_{encodingName}_{suffix}");
-                    suffix++;
+                    var rootName = string.IsNullOrEmpty(sourceFolderName) ? "Encodex" : sourceFolderName;
+                    outputDir = Path.Combine(SourceFolderPath, $"{rootName}_{encodingName}");
                 }
+                else
+                {
+                    // Handle name collision
+                    outputDir = Path.Combine(parentDir, $"{sourceFolderName}_{encodingName}");
+                    int suffix = 2;
+                    while (Directory.Exists(outputDir))
+                    {
+                        outputDir = Path.Combine(parentDir, $"{sourceFolderName}_{encodingName}_{suffix}");
+                        suffix++;
+                    }
 
-                Directory.CreateDirectory(outputDir);
+                    Directory.CreateDirectory(outputDir);
+                }
             }
 
             var selectedItems = FileItems.Where(f => f.IsSelected).ToList();
-            ProgressMaximum = selectedItems.Count + (IsOverwriteInPlace ? 0 : _unmatchedFiles.Count);
+            // In-place mode spends one full pass backing files up before converting,
+            // so that work is mirrored in the progress bar too.
+            var backupCount = overwriteInPlace ? selectedItems.Count : 0;
+            ProgressMaximum = selectedItems.Count + backupCount + (overwriteInPlace ? 0 : _unmatchedFiles.Count);
             ProgressValue = 0;
 
             // Snapshot inputs used inside the background delegates: the user is not
@@ -316,13 +363,14 @@ public partial class MainViewModel : ObservableObject
                 encoding,
                 progress,
                 _cts.Token,
-                IsOverwriteInPlace), _cts.Token);
+                overwriteInPlace,
+                backupCount), _cts.Token);
 
             // Copy unmatched files; progress continues from where conversion stopped.
             // In-place mode has nothing to copy: the unmatched files already live in
             // the source folder.
             UnmatchedCopyResult copyResult = new();
-            if (!IsOverwriteInPlace)
+            if (!overwriteInPlace)
             {
                 copyResult = await Task.Run(() => _converter.CopyUnmatchedFilesAsync(
                     sourcePath,
@@ -351,6 +399,14 @@ public partial class MainViewModel : ObservableObject
         catch (OperationCanceledException)
         {
             StatusText = Res.VM_ConvertCancelled;
+            BuildPartialReport(outputDir);
+        }
+        catch (Exception ex)
+        {
+            // Unexpected failure (e.g. I/O error while backing up): surface it here,
+            // otherwise the exception vanishes inside the async command and the UI
+            // stays stuck on "正在转换" with no report at all.
+            StatusText = string.Format(Res.VM_ConvertFailed, ex.Message);
             BuildPartialReport(outputDir);
         }
         finally
@@ -394,7 +450,7 @@ public partial class MainViewModel : ObservableObject
         // so the WinForms folder browser is used instead.
         var dialog = new System.Windows.Forms.FolderBrowserDialog
         {
-            Description = "选择项目文件夹"
+            Description = Res.VM_FolderDialogDescription
         };
 
         if (dialog.ShowDialog() == System.Windows.Forms.DialogResult.OK)
@@ -426,6 +482,11 @@ public partial class MainViewModel : ObservableObject
     public bool TryAddExtension(ExtensionGroup group, string input)
     {
         if (!_extensionProfile.AddExtension(input, out var normalized))
+            return false;
+
+        // The profile is rebuilt with defaults on every launch, so it can miss
+        // extensions restored from settings; ExtensionOptions is the authoritative set.
+        if (ExtensionOptions.Any(o => o.Extension == normalized))
             return false;
 
         var option = new ExtensionOption(normalized);
@@ -509,7 +570,7 @@ public partial class MainViewModel : ObservableObject
         }
     }
 
-    [RelayCommand]
+    [RelayCommand(CanExecute = nameof(CanReset))]
     private void Reset()
     {
         FileItems.Clear();
@@ -526,6 +587,13 @@ public partial class MainViewModel : ObservableObject
     [RelayCommand(CanExecute = nameof(CanCheckForUpdates))]
     private async Task CheckForUpdatesAsync()
     {
+        // While a download is running the button doubles as "cancel download".
+        if (IsDownloading)
+        {
+            _updateCts?.Cancel();
+            return;
+        }
+
         IsCheckingUpdates = true;
         StatusText = Res.VM_CheckingUpdate;
         try
@@ -540,16 +608,26 @@ public partial class MainViewModel : ObservableObject
                 return;
             }
 
-            var notes = string.IsNullOrWhiteSpace(update.Notes)
-                ? ""
-                : "\n\n" + string.Format(Res.VM_UpdateNotes, update.Notes);
-            var answer = MessageBox.Show(
-                string.Format(Res.VM_NewVersion, update.Version, AppUpdateService.CurrentVersion, notes),
-                Res.VM_NewVersionTitle, MessageBoxButton.YesNo, MessageBoxImage.Question);
-            if (answer != MessageBoxResult.Yes)
+            if (update.Mandatory)
             {
-                StatusText = Res.VM_UpdateCancelled;
-                return;
+                // A mandatory update cannot be dismissed: no Yes/No escape hatch.
+                MessageBox.Show(
+                    string.Format(Res.VM_MandatoryUpdate, update.Version, AppUpdateService.CurrentVersion),
+                    Res.VM_NewVersionTitle, MessageBoxButton.OK, MessageBoxImage.Warning);
+            }
+            else
+            {
+                var notes = string.IsNullOrWhiteSpace(update.Notes)
+                    ? ""
+                    : "\n\n" + string.Format(Res.VM_UpdateNotes, update.Notes);
+                var answer = MessageBox.Show(
+                    string.Format(Res.VM_NewVersion, update.Version, AppUpdateService.CurrentVersion, notes),
+                    Res.VM_NewVersionTitle, MessageBoxButton.YesNo, MessageBoxImage.Question);
+                if (answer != MessageBoxResult.Yes)
+                {
+                    StatusText = Res.VM_UpdateCancelled;
+                    return;
+                }
             }
 
             StatusText = Res.VM_Downloading;
@@ -560,7 +638,25 @@ public partial class MainViewModel : ObservableObject
                     ? string.Format(Res.VM_DownloadingPercent, percent)
                     : Res.VM_Downloading;
             });
-            var zipPath = await _updateService.DownloadAsync(update, progress);
+
+            string zipPath;
+            _updateCts = new CancellationTokenSource();
+            IsDownloading = true;
+            try
+            {
+                zipPath = await _updateService.DownloadAsync(update, progress, _updateCts.Token);
+            }
+            catch (OperationCanceledException)
+            {
+                StatusText = Res.VM_UpdateCancelled;
+                return;
+            }
+            finally
+            {
+                IsDownloading = false;
+                _updateCts?.Dispose();
+                _updateCts = null;
+            }
 
             // From here on there is no going back: the updater replaces the files
             // and restarts the app, so warn the user before shutting down.
@@ -579,7 +675,7 @@ public partial class MainViewModel : ObservableObject
         catch (UpdateException ex)
         {
             StatusText = ex.Message;
-            MessageBox.Show(ex.Message, "检查更新", MessageBoxButton.OK, MessageBoxImage.Warning);
+            MessageBox.Show(ex.Message, Res.VM_CheckUpdateTitle, MessageBoxButton.OK, MessageBoxImage.Warning);
         }
         catch (Exception ex)
         {

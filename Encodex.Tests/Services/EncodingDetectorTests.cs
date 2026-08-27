@@ -39,6 +39,7 @@ public class EncodingDetectorTests : IDisposable
 
         Assert.NotNull(result.Encoding);
         Assert.Equal("utf-8", result.Encoding!.WebName);
+        Assert.Equal(EncodingDetector.Utf8BomName, result.EncodingName);
     }
 
     [Fact]
@@ -95,6 +96,39 @@ public class EncodingDetectorTests : IDisposable
 
         Assert.NotNull(result.Encoding);
         Assert.Equal("utf-32BE", result.Encoding!.WebName);
+    }
+
+    [Fact]
+    public void Detect_Utf8WithoutBom_EncodingNameIsNoBomVariant()
+    {
+        var utf8 = new UTF8Encoding(false);
+        // Long Chinese sample: Ude is unreliable on a few short bytes (see CLAUDE.md).
+        var text = "这是一段足够长的中文测试文本，用于让编码检测器能够可靠地识别出 UTF-8 编码。中华人民共和国成立于一九四九年，中国的首都北京是一座历史悠久的城市。";
+
+        var result = new EncodingDetector().Detect(utf8.GetBytes(text));
+
+        Assert.NotNull(result.Encoding);
+        Assert.Equal("utf-8", result.Encoding!.WebName);
+        Assert.Equal(EncodingDetector.Utf8NoBomName, result.EncodingName);
+    }
+
+    [Fact]
+    public void ResolveName_Utf8Variants_MapToBomFlaggedEncodings()
+    {
+        var withBom = EncodingDetector.ResolveName(EncodingDetector.Utf8BomName);
+        var withoutBom = EncodingDetector.ResolveName(EncodingDetector.Utf8NoBomName);
+
+        Assert.NotNull(withBom);
+        Assert.NotNull(withoutBom);
+        Assert.Equal("utf-8", withBom!.WebName);
+        Assert.Equal("utf-8", withoutBom!.WebName);
+        Assert.Equal(3, withBom.GetPreamble().Length);
+        Assert.Empty(withoutBom.GetPreamble());
+
+        // Other names keep the plain GetEncoding behavior.
+        Assert.NotNull(EncodingDetector.ResolveName("GBK"));
+        Assert.Null(EncodingDetector.ResolveName("no-such-encoding"));
+        Assert.Null(EncodingDetector.ResolveName(null));
     }
 
     [Fact]

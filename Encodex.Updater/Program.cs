@@ -41,7 +41,13 @@ internal static class Program
             var zipPath = ResolveZipPath(args[1]);
             appPath = Path.Combine(installDirectory, MainAppFileName);
 
-            Run(int.Parse(args[0]), zipPath, installDirectory);
+            if (!Run(int.Parse(args[0]), zipPath, installDirectory))
+            {
+                // Aborted because the main app is still running: do NOT restart it
+                // here, that would spawn a second instance.
+                Log("Update aborted: main process did not exit in time.");
+                return 2;
+            }
             Log("Update finished successfully.");
             return 0;
         }
@@ -58,9 +64,19 @@ internal static class Program
         }
     }
 
-    private static void Run(int mainProcessId, string zipPath, string installDirectory)
+    /// <summary>
+    /// Waits for the main process, removes stale updater backups, extracts the zip
+    /// and relaunches the app.
+    /// </summary>
+    /// <returns>false when the update was aborted because the main process did not
+    /// exit within the wait window; the main app is still running in that case.</returns>
+    private static bool Run(int mainProcessId, string zipPath, string installDirectory)
     {
-        WaitForProcessExit(mainProcessId);
+        if (!WaitForProcessExit(mainProcessId))
+        {
+            ShowTimeoutWarning();
+            return false;
+        }
 
         // Leftovers from a previous updater self-replacement; safe to delete now.
         DeleteFilesWithExtension(installDirectory, UpdaterBackupExtension);
@@ -103,6 +119,7 @@ internal static class Program
 
         Log("Relaunching Encodex.exe");
         TryStart(appPath: Path.Combine(installDirectory, MainAppFileName));
+        return true;
     }
 
     /// <summary>
@@ -145,7 +162,9 @@ internal static class Program
     /// single WaitForExit timeout: extracting while the app still holds file locks is
     /// the main cause of failed updates.
     /// </summary>
-    private static void WaitForProcessExit(int processId)
+    /// <returns>false when the process was still running after ~60 seconds; the caller
+    /// must abort the update instead of extracting against live file locks.</returns>
+    private static bool WaitForProcessExit(int processId)
     {
         for (var attempt = 0; attempt < 240; attempt++) // up to ~60 seconds
         {
@@ -153,18 +172,40 @@ internal static class Program
             {
                 using var process = Process.GetProcessById(processId);
                 if (process.HasExited)
-                    break;
+                {
+                    // Give the file system a moment to release the process' file handles.
+                    Thread.Sleep(500);
+                    return true;
+                }
             }
             catch (ArgumentException)
             {
-                break; // Process already exited.
+                return true; // Process already exited.
             }
 
             Thread.Sleep(250);
         }
 
-        // Give the file system a moment to release the process' file handles.
-        Thread.Sleep(500);
+        return false;
+    }
+
+    /// <summary>Timeout dialog: the main app is still running, so the update must not
+    /// proceed (extracting would hit live file locks) and it must not be restarted.</summary>
+    private static void ShowTimeoutWarning()
+    {
+        try
+        {
+            MessageBox.Show(
+                "Encodex 未能在预期时间内退出（可能有未保存的工作），本次自动更新已中止。\n\n" +
+                "当前应用仍在运行，关闭应用后可重新检查更新。",
+                "Encodex 更新",
+                MessageBoxButton.OK,
+                MessageBoxImage.Warning);
+        }
+        catch
+        {
+            // Nothing else we can do.
+        }
     }
 
     /// <summary>

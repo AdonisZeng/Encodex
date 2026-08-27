@@ -128,10 +128,19 @@ public static class CliRunner
         }
         else
         {
+            // A drive root ("C:\", "D:") has no parent directory: GetDirectoryName
+            // returns null there, so place the output inside the source folder instead.
             var trimmed = sourceDir!.TrimEnd('\\');
-            targetDir = Path.Combine(
-                Path.GetDirectoryName(trimmed)!,
-                $"{Path.GetFileName(trimmed)}_{targetEncoding.WebName}");
+            var parent = Path.GetDirectoryName(trimmed);
+            var name = Path.GetFileName(trimmed);
+            if (string.IsNullOrEmpty(parent) || string.IsNullOrEmpty(name))
+            {
+                targetDir = Path.Combine(sourceDir!, "Encodex_" + targetEncoding.WebName);
+            }
+            else
+            {
+                targetDir = Path.Combine(parent, $"{name}_{targetEncoding.WebName}");
+            }
         }
 
         // Run the async conversion on the thread pool: awaiting it synchronously on a

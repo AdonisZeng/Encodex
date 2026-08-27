@@ -74,4 +74,8 @@ public class AppSettings
 
     /// <summary>Extensions that were checked when the settings were saved.</summary>
     public List<string> SelectedExtensions { get; set; } = new();
+
+    /// <summary>Custom (non-default) extensions added by the user, persisted so they
+    /// survive a restart.</summary>
+    public List<string> CustomExtensions { get; set; } = new();
 }

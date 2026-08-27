@@ -2,6 +2,7 @@ using System.IO;
 using System.Text;
 using System.Windows;
 using Encodex.Resources;
+using Encodex.Services;
 
 namespace Encodex;
 
@@ -20,15 +21,10 @@ public partial class PreviewWindow : Window
     {
         FileNameText.Text = string.Format(Res.Prev_File, filePath);
 
-        Encoding? sourceEncoding = null;
-        if (!string.IsNullOrEmpty(detectedEncodingName))
-        {
-            try { sourceEncoding = Encoding.GetEncoding(detectedEncodingName); }
-            catch { }
-        }
+        Encoding? sourceEncoding = EncodingDetector.ResolveName(detectedEncodingName);
 
         EncodingInfoText.Text = sourceEncoding == null
-            ? string.Format(Res.Prev_UnknownEncoding, detectedEncodingName ?? "未知")
+            ? string.Format(Res.Prev_UnknownEncoding, detectedEncodingName ?? Res.Prev_Unknown)
             : string.Format(Res.Prev_EncodingInfo, detectedEncodingName, targetEncoding.EncodingName);
 
         byte[] head;

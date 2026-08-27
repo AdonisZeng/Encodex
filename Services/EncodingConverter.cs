@@ -61,7 +61,8 @@ public class EncodingConverter
         Encoding targetEncoding,
         IProgress<ConversionProgress>? progress = null,
         CancellationToken cancellationToken = default,
-        bool overwriteInPlace = false)
+        bool overwriteInPlace = false,
+        int progressOffset = 0)
     {
         var selected = items.Where(i => i.IsSelected).ToList();
 
@@ -69,16 +70,22 @@ public class EncodingConverter
         // of them, so a partial failure never leaves the originals unrecoverable.
         string? backupDirectory = null;
         if (overwriteInPlace)
-            backupDirectory = await BackupFilesAsync(selected, sourceDirectory, cancellationToken);
+            backupDirectory = BackupFilesAsync(selected, sourceDirectory, progress, cancellationToken);
+
+        // Files whose backup failed must never be rewritten in place (the backup is
+        // the only recovery path), so they are excluded from the conversion pass.
+        var convertList = overwriteInPlace
+            ? selected.Where(i => i.Status != ConversionStatus.Failed).ToList()
+            : selected;
 
         int success = 0, skipped = 0, failed = 0, copied = 0, processed = 0;
         using var semaphore = new SemaphoreSlim(Math.Max(1, Math.Min(Environment.ProcessorCount, MaxConcurrency)));
-        var tasks = new List<Task>(selected.Count);
+        var tasks = new List<Task>(convertList.Count);
 
         // Each file is independent (distinct source and output), so files convert in
         // parallel under a concurrency cap. Counter updates are atomic via Interlocked;
         // progress is aggregated as files complete.
-        foreach (var item in selected)
+        foreach (var item in convertList)
         {
             tasks.Add(Task.Run(async () =>
             {
@@ -104,8 +111,8 @@ public class EncodingConverter
                 var done = Interlocked.Increment(ref processed);
                 progress?.Report(new ConversionProgress
                 {
-                    Processed = done,
-                    Total = selected.Count,
+                    Processed = progressOffset + done,
+                    Total = progressOffset + convertList.Count,
                     CurrentFile = item.RelativePath
                 });
             }, cancellationToken));
@@ -124,8 +131,8 @@ public class EncodingConverter
 
         progress?.Report(new ConversionProgress
         {
-            Processed = selected.Count,
-            Total = selected.Count,
+            Processed = progressOffset + convertList.Count,
+            Total = progressOffset + convertList.Count,
             CurrentFile = ""
         });
 
@@ -141,24 +148,47 @@ public class EncodingConverter
     }
 
     /// <summary>Copies every selected source file into a fresh temp backup folder,
-    /// preserving the relative directory structure.</summary>
-    private static async Task<string> BackupFilesAsync(
+    /// preserving the relative directory structure. Per-file failures (locked,
+    /// unreadable) mark the item Failed so it is excluded from the in-place rewrite
+    /// instead of aborting the whole backup pass. Progress covers the backup phase
+    /// (offset 0); the conversion phase continues from ConvertAsync's progressOffset.</summary>
+    private static string? BackupFilesAsync(
         List<FileConversionItem> items,
         string sourceDirectory,
+        IProgress<ConversionProgress>? progress,
         CancellationToken cancellationToken)
     {
-        var backupDirectory = Path.Combine(
-            Path.GetTempPath(),
-            $"Encodex-backup-{DateTime.Now:yyyyMMdd-HHmmss}");
+        // The timestamp is only second-precise: two conversions started within the
+        // same second must not share (and overwrite) one backup folder.
+        var stamp = DateTime.Now.ToString("yyyyMMdd-HHmmss");
+        var backupDirectory = Path.Combine(Path.GetTempPath(), $"Encodex-backup-{stamp}");
+        for (int suffix = 2; Directory.Exists(backupDirectory); suffix++)
+            backupDirectory = Path.Combine(Path.GetTempPath(), $"Encodex-backup-{stamp}-{suffix}");
         Directory.CreateDirectory(backupDirectory);
 
-        foreach (var item in items)
+        for (int i = 0; i < items.Count; i++)
         {
+            var item = items[i];
             cancellationToken.ThrowIfCancellationRequested();
             var sourcePath = Path.Combine(sourceDirectory, item.RelativePath);
             var backupPath = Path.Combine(backupDirectory, item.RelativePath);
-            Directory.CreateDirectory(Path.GetDirectoryName(backupPath)!);
-            File.Copy(sourcePath, backupPath, overwrite: true);
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(backupPath)!);
+                File.Copy(sourcePath, backupPath, overwrite: true);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                item.Status = ConversionStatus.Failed;
+                item.StatusMessage = Res.Conv_BackupFailed;
+            }
+
+            progress?.Report(new ConversionProgress
+            {
+                Processed = i + 1,
+                Total = items.Count,
+                CurrentFile = item.RelativePath
+            });
         }
 
         return backupDirectory;
@@ -369,19 +399,10 @@ public class EncodingConverter
 
     private static Encoding? GetStrictEncodingFromName(string? name)
     {
-        if (string.IsNullOrEmpty(name))
+        var encoding = EncodingDetector.ResolveName(name);
+        if (encoding == null)
             return null;
-        try
-        {
-            return Encoding.GetEncoding(
-                name,
-                EncoderFallback.ExceptionFallback,
-                DecoderFallback.ExceptionFallback);
-        }
-        catch
-        {
-            return null;
-        }
+        return GetStrictEncoding(encoding);
     }
 
     private static Encoding GetStrictEncoding(Encoding encoding)
