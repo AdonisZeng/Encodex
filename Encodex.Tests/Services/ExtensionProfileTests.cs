@@ -76,4 +76,58 @@ public class ExtensionProfileTests
         Assert.False(profile.Matches("image.png"));
         Assert.False(profile.Matches("binary.exe"));
     }
+
+    [Fact]
+    public void Matches_IsCaseInsensitiveOnBothSides()
+    {
+        var profile = new ExtensionProfile();
+        profile.AddExtension(".xyz");
+
+        Assert.True(profile.Matches("Readme.XYZ"));
+        Assert.True(profile.Matches("readme.xyz"));
+        Assert.False(profile.Matches("readme.xyz.bak"));
+    }
+
+    [Fact]
+    public void RemoveExtension_IsCaseInsensitive()
+    {
+        var profile = new ExtensionProfile();
+
+        Assert.True(profile.RemoveExtension(".CS"));
+        Assert.False(profile.Matches("Program.cs"));
+    }
+
+    // ---- C1: TryNormalize is the shared pure validator ----
+
+    [Theory]
+    [InlineData("TXT", ".txt")]
+    [InlineData(" txt ", ".txt")]
+    [InlineData(".TXT", ".txt")]
+    [InlineData("log", ".log")]
+    public void TryNormalize_NormalizesInput(string input, string expected)
+    {
+        Assert.True(ExtensionProfile.TryNormalize(input, out var normalized));
+        Assert.Equal(expected, normalized);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData(".")]
+    [InlineData("..")]
+    [InlineData(".my ext")]
+    [InlineData("my ext")]
+    [InlineData(".c++")]
+    public void TryNormalize_RejectsInvalidInput(string input)
+    {
+        Assert.False(ExtensionProfile.TryNormalize(input, out var normalized));
+        Assert.Equal("", normalized);
+    }
+
+    [Fact]
+    public void TryNormalize_AcceptsSingleLetterExtension()
+    {
+        Assert.True(ExtensionProfile.TryNormalize(".c", out var normalized));
+        Assert.Equal(".c", normalized);
+    }
 }

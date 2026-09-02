@@ -7,6 +7,10 @@ public class ExtensionProfile
 {
     private readonly ObservableCollection<string> _extensions = new();
 
+    /// <summary>Constant-time membership for <see cref="Matches"/>, which runs once per
+    /// scanned file. Case-insensitive so "Program.CS" matches a stored ".cs".</summary>
+    private readonly HashSet<string> _lookup = new(StringComparer.OrdinalIgnoreCase);
+
     public IReadOnlyList<string> Extensions => _extensions;
 
     public ExtensionProfile()
@@ -20,7 +24,10 @@ public class ExtensionProfile
         if (loadDefaults)
         {
             foreach (var ext in GetDefaultExtensions())
+            {
                 _extensions.Add(ext);
+                _lookup.Add(ext);
+            }
         }
     }
 
@@ -58,37 +65,53 @@ public class ExtensionProfile
 
     public bool AddExtension(string extension, out string normalized)
     {
-        normalized = NormalizeExtension(extension);
-        if (!IsValidExtension(normalized) || _extensions.Contains(normalized))
+        if (!TryNormalize(extension, out var candidate) || !_lookup.Add(candidate))
         {
             normalized = "";
             return false;
         }
-        _extensions.Add(normalized);
+
+        normalized = candidate;
+        _extensions.Add(candidate);
         return true;
     }
 
-    private static bool IsValidExtension(string extension)
-        => extension.Length >= 2 && extension[0] == '.'
-            && extension.Skip(1).All(char.IsLetterOrDigit);
+    /// <summary>
+    /// Normalizes user input into a comparable extension ("TXT" → ".txt"). Pure and
+    /// side-effect free, so the view model and the CLI can both validate and report
+    /// precisely why an input was rejected before touching any collection.
+    /// </summary>
+    public static bool TryNormalize(string? extension, out string normalized)
+    {
+        normalized = "";
+        if (extension is not { } input || string.IsNullOrWhiteSpace(input))
+            return false;
+
+        var trimmed = input.Trim();
+        if (!trimmed.StartsWith("."))
+            trimmed = "." + trimmed;
+
+        // ".x" minimum, and everything after the dot must be a letter or digit
+        // (rejects "..", ".my ext", ".c++", …).
+        if (trimmed.Length < 2 || !trimmed.Skip(1).All(char.IsLetterOrDigit))
+            return false;
+
+        normalized = trimmed.ToLowerInvariant();
+        return true;
+    }
 
     public bool RemoveExtension(string extension)
     {
-        extension = NormalizeExtension(extension);
-        return _extensions.Remove(extension);
-    }
-
-    private static string NormalizeExtension(string extension)
-    {
-        extension = extension.Trim();
-        if (!extension.StartsWith("."))
-            extension = '.' + extension;
-        return extension.ToLowerInvariant();
+        if (!TryNormalize(extension, out var normalized))
+            return false;
+        var removed = _extensions.Remove(normalized);
+        _lookup.Remove(normalized);
+        return removed;
     }
 
     public bool Matches(string fileName)
     {
-        var ext = Path.GetExtension(fileName).ToLowerInvariant();
-        return _extensions.Contains(ext);
+        var ext = Path.GetExtension(fileName);
+        return ext.Length > 0 && _lookup.Contains(ext);
     }
 }

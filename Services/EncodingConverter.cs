@@ -42,8 +42,9 @@ public class EncodingConverter
     private const int BufferSize = 64 * 1024;
 
     /// <summary>Cap on concurrent file conversions: disk-bound work does not scale
-    /// past a handful of parallel streams.</summary>
-    private const int MaxConcurrency = 8;
+    /// past a handful of parallel streams. Scanning, backing up and copying unmatched
+    /// files reuse the same cap so every phase behaves the same on the same disk.</summary>
+    internal const int MaxConcurrency = 8;
 
     /// <summary>Outcome of converting one file, used to aggregate summary counters.</summary>
     private enum ConvertOutcome
@@ -70,7 +71,7 @@ public class EncodingConverter
         // of them, so a partial failure never leaves the originals unrecoverable.
         string? backupDirectory = null;
         if (overwriteInPlace)
-            backupDirectory = BackupFilesAsync(selected, sourceDirectory, progress, cancellationToken);
+            backupDirectory = await BackupFilesAsync(selected, sourceDirectory, progress, cancellationToken);
 
         // Files whose backup failed must never be rewritten in place (the backup is
         // the only recovery path), so they are excluded from the conversion pass.
@@ -129,12 +130,10 @@ public class EncodingConverter
             throw;
         }
 
-        progress?.Report(new ConversionProgress
-        {
-            Processed = progressOffset + convertList.Count,
-            Total = progressOffset + convertList.Count,
-            CurrentFile = ""
-        });
+        // No terminal report here: the per-file reports already reach
+        // progressOffset + convertList.Count, and this method does not know the
+        // caller's global maximum (backup phase + unmatched copies). The caller
+        // snaps the bar to full once every phase has finished.
 
         return new ConversionSummary
         {
@@ -151,8 +150,10 @@ public class EncodingConverter
     /// preserving the relative directory structure. Per-file failures (locked,
     /// unreadable) mark the item Failed so it is excluded from the in-place rewrite
     /// instead of aborting the whole backup pass. Progress covers the backup phase
-    /// (offset 0); the conversion phase continues from ConvertAsync's progressOffset.</summary>
-    private static string? BackupFilesAsync(
+    /// (offset 0); the conversion phase continues from ConvertAsync's progressOffset.
+    /// Files are copied concurrently: the pass is disk-bound and a serial walk
+    /// dominates the total time on large trees.</summary>
+    private static async Task<string?> BackupFilesAsync(
         List<FileConversionItem> items,
         string sourceDirectory,
         IProgress<ConversionProgress>? progress,
@@ -166,31 +167,55 @@ public class EncodingConverter
             backupDirectory = Path.Combine(Path.GetTempPath(), $"Encodex-backup-{stamp}-{suffix}");
         Directory.CreateDirectory(backupDirectory);
 
-        for (int i = 0; i < items.Count; i++)
-        {
-            var item = items[i];
-            cancellationToken.ThrowIfCancellationRequested();
-            var sourcePath = Path.Combine(sourceDirectory, item.RelativePath);
-            var backupPath = Path.Combine(backupDirectory, item.RelativePath);
-            try
-            {
-                Directory.CreateDirectory(Path.GetDirectoryName(backupPath)!);
-                File.Copy(sourcePath, backupPath, overwrite: true);
-            }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-            {
-                item.Status = ConversionStatus.Failed;
-                item.StatusMessage = Res.Conv_BackupFailed;
-            }
+        int processed = 0;
+        using var semaphore = new SemaphoreSlim(MaxConcurrency);
+        var tasks = new List<Task>(items.Count);
 
-            progress?.Report(new ConversionProgress
+        foreach (var item in items)
+        {
+            tasks.Add(Task.Run(async () =>
             {
-                Processed = i + 1,
-                Total = items.Count,
-                CurrentFile = item.RelativePath
-            });
+                await semaphore.WaitAsync(cancellationToken);
+                try
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+
+                    // Skipped items (binary files) are never rewritten in place, so
+                    // copying them would be wasted IO; they still advance progress so
+                    // the caller's backup/progress offset chain stays intact.
+                    if (item.Status != ConversionStatus.Skipped)
+                    {
+                        var sourcePath = Path.Combine(sourceDirectory, item.RelativePath);
+                        var backupPath = Path.Combine(backupDirectory, item.RelativePath);
+                        try
+                        {
+                            // Concurrent CreateDirectory calls on the same path are idempotent.
+                            Directory.CreateDirectory(Path.GetDirectoryName(backupPath)!);
+                            File.Copy(sourcePath, backupPath, overwrite: true);
+                        }
+                        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                        {
+                            item.Status = ConversionStatus.Failed;
+                            item.StatusMessage = Res.Conv_BackupFailed;
+                        }
+                    }
+
+                    var done = Interlocked.Increment(ref processed);
+                    progress?.Report(new ConversionProgress
+                    {
+                        Processed = done,
+                        Total = items.Count,
+                        CurrentFile = item.RelativePath
+                    });
+                }
+                finally
+                {
+                    semaphore.Release();
+                }
+            }, cancellationToken));
         }
 
+        await Task.WhenAll(tasks);
         return backupDirectory;
     }
 
@@ -223,33 +248,70 @@ public class EncodingConverter
                 // Unknown encoding: nothing to convert, keep the file as-is.
                 if (!overwriteInPlace)
                     CopyFile(sourcePath, outputPath);
-                item.Status = ConversionStatus.Copied;
+                // Binary files were already Skipped at scan time: an untouched file
+                // must not be re-reported as "copied".
+                if (item.Status != ConversionStatus.Skipped)
+                    item.Status = ConversionStatus.Copied;
                 // Preserve a scan-time reason (e.g. "二进制文件") when present.
                 item.StatusMessage ??= Res.Conv_UnknownCopy;
-                return ConvertOutcome.Copied;
+                return item.Status == ConversionStatus.Skipped
+                    ? ConvertOutcome.Skipped
+                    : ConvertOutcome.Copied;
             }
 
             var target = GetStrictEncoding(targetEncoding);
             var targetPreamble = targetEncoding.GetPreamble();
-            var sourceHasBom = await HasBomAsync(sourcePath, cancellationToken);
             var targetHasBom = targetPreamble.Length > 0;
 
-            // Same code page and same BOM intent: copying is exactly what a
-            // conversion would produce, so skip the decode/re-encode round-trip.
-            if (sourceEncoding.CodePage == target.CodePage && sourceHasBom == targetHasBom)
+            // Single open per file: the head bytes answer the BOM question and the
+            // same handle then feeds either the straight copy or the conversion.
+            // (Previously the BOM check opened the file a second time.)
+            // The handle must be released before the temp file can replace the
+            // source — in-place mode rewrites the very same path.
+            FileStream? sourceStream = null;
+            try
             {
-                if (!overwriteInPlace)
-                    CopyFile(sourcePath, outputPath);
-                item.Status = ConversionStatus.Skipped;
-                item.StatusMessage = Res.Conv_SameCopy;
-                return ConvertOutcome.Skipped;
-            }
+                sourceStream = new FileStream(
+                    sourcePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, BufferSize, useAsync: true);
+                var sourceHasBom = await DetectBomAsync(sourceStream, cancellationToken);
+                sourceStream.Seek(0, SeekOrigin.Begin);
 
-            tempPath = outputPath + ".tmp";
-            await ConvertFileAsync(sourcePath, tempPath, sourceEncoding, target, targetPreamble, cancellationToken);
-            MoveFile(tempPath, outputPath);
-            tempPath = null;
-            PreserveTimestamps(sourcePath, outputPath);
+                // Same code page and same BOM intent: copying is exactly what a
+                // conversion would produce, so skip the decode/re-encode round-trip.
+                if (sourceEncoding.CodePage == target.CodePage && sourceHasBom == targetHasBom)
+                {
+                    if (!overwriteInPlace)
+                    {
+                        await CopyStreamAsync(sourceStream, outputPath, cancellationToken);
+                        PreserveTimestamps(sourcePath, outputPath);
+                    }
+                    item.Status = ConversionStatus.Skipped;
+                    item.StatusMessage = Res.Conv_SameCopy;
+                    return ConvertOutcome.Skipped;
+                }
+
+                // The source is gone once the temp file replaces it, so its timestamps
+                // must be captured before the rewrite — reading them afterwards would
+                // return the rewritten file's own (current) timestamps.
+                var capturedTimestamps = overwriteInPlace ? TryCaptureTimestamps(sourcePath) : null;
+
+                tempPath = outputPath + ".tmp";
+                await ConvertFileAsync(sourceStream, tempPath, sourceEncoding, target, targetPreamble, cancellationToken);
+
+                sourceStream.Dispose();
+                sourceStream = null;
+
+                ReplaceFile(tempPath, outputPath);
+                tempPath = null;
+                if (capturedTimestamps is { } timestamps)
+                    ApplyTimestamps(timestamps, outputPath);
+                else
+                    PreserveTimestamps(sourcePath, outputPath);
+            }
+            finally
+            {
+                sourceStream?.Dispose();
+            }
 
             item.Status = ConversionStatus.Success;
             return ConvertOutcome.Success;
@@ -305,33 +367,69 @@ public class EncodingConverter
         CancellationToken cancellationToken = default)
     {
         var result = new UnmatchedCopyResult();
+        if (unmatchedFiles.Count == 0)
+            return result;
+
+        // Unmatched files are typically the bulk of a tree's bytes (images, videos,
+        // build artifacts), so they copy concurrently. Outcomes land in per-index
+        // slots so the report keeps the input order without any locking.
+        var relativePaths = new string[unmatchedFiles.Count];
+        var copied = new bool[unmatchedFiles.Count];
+        int processed = 0;
+        using var semaphore = new SemaphoreSlim(MaxConcurrency);
+        var tasks = new List<Task>(unmatchedFiles.Count);
 
         for (int i = 0; i < unmatchedFiles.Count; i++)
         {
-            cancellationToken.ThrowIfCancellationRequested();
+            int index = i;
+            var file = unmatchedFiles[index];
+            relativePaths[index] = PathHelper.GetRelativePath(sourceDirectory, file);
 
-            var file = unmatchedFiles[i];
-            progress?.Report(new ConversionProgress
+            tasks.Add(Task.Run(async () =>
             {
-                Processed = progressOffset + i,
-                Total = progressOffset + unmatchedFiles.Count,
-                CurrentFile = file
-            });
+                await semaphore.WaitAsync(cancellationToken);
+                try
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
 
-            var relativePath = PathHelper.GetRelativePath(sourceDirectory, file);
-            var outputPath = Path.Combine(outputDirectory, relativePath);
+                    try
+                    {
+                        var outputPath = Path.Combine(outputDirectory, relativePaths[index]);
+                        // Concurrent CreateDirectory calls on the same path are idempotent.
+                        Directory.CreateDirectory(Path.GetDirectoryName(outputPath)!);
+                        CopyFile(file, outputPath);
+                        copied[index] = true;
+                    }
+                    catch (Exception)
+                    {
+                        // One unreadable/locked file must not abort the whole copy pass.
+                    }
 
-            try
-            {
-                Directory.CreateDirectory(Path.GetDirectoryName(outputPath)!);
-                CopyFile(file, outputPath);
-                result.CopiedFiles.Add(relativePath);
-            }
-            catch (Exception)
-            {
-                // One unreadable/locked file must not abort the whole copy pass.
-                result.FailedFiles.Add(relativePath);
-            }
+                    var done = Interlocked.Increment(ref processed);
+                    // Reported after the attempt so the last value is exactly
+                    // offset + count and the bar never stalls one short.
+                    progress?.Report(new ConversionProgress
+                    {
+                        Processed = progressOffset + done,
+                        Total = progressOffset + unmatchedFiles.Count,
+                        CurrentFile = file
+                    });
+                }
+                finally
+                {
+                    semaphore.Release();
+                }
+            }, cancellationToken));
+        }
+
+        await Task.WhenAll(tasks);
+
+        for (int i = 0; i < unmatchedFiles.Count; i++)
+        {
+            if (copied[i])
+                result.CopiedFiles.Add(relativePaths[i]);
+            else
+                result.FailedFiles.Add(relativePaths[i]);
         }
 
         return result;
@@ -344,18 +442,21 @@ public class EncodingConverter
     /// silently becoming replacement characters (garbage output).
     /// </summary>
     private static async Task ConvertFileAsync(
-        string sourcePath,
+        Stream sourceStream,
         string tempPath,
         Encoding sourceEncoding,
         Encoding targetEncoding,
         byte[] targetPreamble,
         CancellationToken cancellationToken)
     {
+        // The caller owns the stream (it was opened once for both the BOM check and
+        // this conversion), so it must be left open here.
         using var reader = new StreamReader(
-            sourcePath,
+            sourceStream,
             sourceEncoding,
             detectEncodingFromByteOrderMarks: false,
-            bufferSize: BufferSize);
+            bufferSize: BufferSize,
+            leaveOpen: true);
 
         // StreamReader does not consume the BOM when byte-order-mark detection is
         // disabled, so strip the U+FEFF character manually.
@@ -380,10 +481,18 @@ public class EncodingConverter
         await writer.FlushAsync();
     }
 
-    private static async Task<bool> HasBomAsync(string filePath, CancellationToken cancellationToken)
+    /// <summary>Folder name for an output directory; distinguishes BOM variants that
+    /// share the same WebName (UTF-8 with/without BOM are both "utf-8"). Shared by the
+    /// GUI and the CLI so both name their output folders identically.</summary>
+    public static string GetEncodingFolderName(Encoding encoding)
+        => encoding.GetPreamble().Length > 0 ? encoding.WebName + "-bom" : encoding.WebName;
+
+    /// <summary>Reads the head of an already-open stream and reports whether it starts
+    /// with a byte-order mark. The caller rewinds the stream afterwards, so the same
+    /// handle can be reused for the actual conversion.</summary>
+    private static async Task<bool> DetectBomAsync(Stream stream, CancellationToken cancellationToken)
     {
         var buffer = new byte[4];
-        using var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, 4, useAsync: true);
         int read = await stream.ReadAsync(buffer, 0, buffer.Length, cancellationToken);
 
         if (read >= 3 && buffer[0] == 0xEF && buffer[1] == 0xBB && buffer[2] == 0xBF)
@@ -395,6 +504,15 @@ public class EncodingConverter
         if (read >= 2 && ((buffer[0] == 0xFF && buffer[1] == 0xFE) || (buffer[0] == 0xFE && buffer[1] == 0xFF)))
             return true;
         return false;
+    }
+
+    /// <summary>Streams the source straight into the output without decoding, for the
+    /// skip path; reuses the already-open handle so the file is only read once.</summary>
+    private static async Task CopyStreamAsync(Stream source, string destinationPath, CancellationToken cancellationToken)
+    {
+        using var destination = new FileStream(
+            destinationPath, FileMode.Create, FileAccess.Write, FileShare.None, BufferSize, useAsync: true);
+        await source.CopyToAsync(destination, BufferSize, cancellationToken);
     }
 
     private static Encoding? GetStrictEncodingFromName(string? name)
@@ -428,13 +546,37 @@ public class EncodingConverter
     /// source timestamps over so backups and converted outputs stay recognizable.</summary>
     private static void PreserveTimestamps(string source, string destination)
     {
+        var captured = TryCaptureTimestamps(source);
+        if (captured is { } timestamps)
+            ApplyTimestamps(timestamps, destination);
+    }
+
+    /// <summary>Reads a file's timestamps so they survive an in-place rewrite: once the
+    /// file has been replaced, reading it again yields the rewritten file's own values.</summary>
+    private static (DateTime CreationUtc, DateTime LastWriteUtc, DateTime LastAccessUtc)? TryCaptureTimestamps(string file)
+    {
         try
         {
-            var sourceInfo = new FileInfo(source);
+            var info = new FileInfo(file);
+            return (info.CreationTimeUtc, info.LastWriteTimeUtc, info.LastAccessTimeUtc);
+        }
+        catch
+        {
+            // Best effort: a locked or exotic file must not fail the conversion.
+            return null;
+        }
+    }
+
+    private static void ApplyTimestamps(
+        (DateTime CreationUtc, DateTime LastWriteUtc, DateTime LastAccessUtc) timestamps,
+        string destination)
+    {
+        try
+        {
             var destInfo = new FileInfo(destination);
-            destInfo.CreationTimeUtc = sourceInfo.CreationTimeUtc;
-            destInfo.LastWriteTimeUtc = sourceInfo.LastWriteTimeUtc;
-            destInfo.LastAccessTimeUtc = sourceInfo.LastAccessTimeUtc;
+            destInfo.CreationTimeUtc = timestamps.CreationUtc;
+            destInfo.LastWriteTimeUtc = timestamps.LastWriteUtc;
+            destInfo.LastAccessTimeUtc = timestamps.LastAccessUtc;
         }
         catch
         {
@@ -442,11 +584,17 @@ public class EncodingConverter
         }
     }
 
-    /// <summary>.NET Framework has no File.Move overload with an overwrite flag.</summary>
-    private static void MoveFile(string source, string destination)
+    /// <summary>
+    /// Replaces the destination with the freshly written file. <see cref="File.Replace"/>
+    /// is atomic — the destination is never momentarily absent, so a failure mid-swap
+    /// cannot leave the user without the original file. It throws when the destination
+    /// does not exist, in which case a plain move is enough.
+    /// </summary>
+    private static void ReplaceFile(string source, string destination)
     {
         if (File.Exists(destination))
-            File.Delete(destination);
-        File.Move(source, destination);
+            File.Replace(source, destination, destinationBackupFileName: null);
+        else
+            File.Move(source, destination);
     }
 }

@@ -44,7 +44,7 @@ public class MainViewModelTests : IDisposable
 
         var added = vm.TryAddExtension(group, ".log");
 
-        Assert.True(added);
+        Assert.Equal(ExtensionAddResult.Added, added);
         var option = group.Extensions.Last();
         Assert.Equal(".log", option.Extension);
         Assert.True(option.IsSelected);
@@ -60,7 +60,7 @@ public class MainViewModelTests : IDisposable
         var count = vm.ExtensionOptions.Count;
         var added = vm.TryAddExtension(group, ".cs");
 
-        Assert.False(added);
+        Assert.Equal(ExtensionAddResult.Duplicate, added);
         Assert.Equal(count, vm.ExtensionOptions.Count);
     }
 
@@ -70,9 +70,24 @@ public class MainViewModelTests : IDisposable
         var vm = CreateViewModel();
         var group = vm.ExtensionGroups.First();
 
-        Assert.False(vm.TryAddExtension(group, ""));
-        Assert.False(vm.TryAddExtension(group, "."));
-        Assert.False(vm.TryAddExtension(group, ".my ext"));
+        Assert.Equal(ExtensionAddResult.Invalid, vm.TryAddExtension(group, ""));
+        Assert.Equal(ExtensionAddResult.Invalid, vm.TryAddExtension(group, "."));
+        Assert.Equal(ExtensionAddResult.Invalid, vm.TryAddExtension(group, ".my ext"));
+    }
+
+    // ---- B2: a restored custom extension is a duplicate, not an invalid input ----
+
+    [Fact]
+    public void TryAddExtension_RestoredCustomExtension_IsReportedAsDuplicate()
+    {
+        var settingsPath = Path.Combine(_tempDir, "settings-dup.json");
+        Directory.CreateDirectory(_tempDir);
+        File.WriteAllText(settingsPath,
+            """{"CustomExtensions":[".log"],"SelectedExtensions":[".log",".cs"]}""");
+
+        var vm = new MainViewModel(new AppSettingsStore(settingsPath));
+
+        Assert.Equal(ExtensionAddResult.Duplicate, vm.TryAddExtension(vm.ExtensionGroups.First(), ".log"));
     }
 
     [Fact]
@@ -238,6 +253,255 @@ public class MainViewModelTests : IDisposable
 
         Assert.Empty(vm.ReportSections);
         Assert.Null(vm.Summary);
+    }
+
+    // ---- D1: the temp backup can be deleted from the report page ----
+
+    [Fact]
+    public async Task DeleteBackup_RemovesDirectoryAndHidesNotice()
+    {
+        var dir = Path.Combine(_tempDir, "src7");
+        Directory.CreateDirectory(dir);
+        File.WriteAllBytes(Path.Combine(dir, "a.txt"),
+            Encoding.GetEncoding("GBK").GetBytes("你好世界"));
+
+        var vm = CreateViewModel();
+        vm.SourceFolderPath = dir;
+        vm.IsOverwriteInPlace = true;
+        await vm.ScanCommand.ExecuteAsync(null);
+        await vm.ConvertCommand.ExecuteAsync(null);
+
+        var backup = vm.Summary!.BackupDirectory;
+        Assert.NotNull(backup);
+        Assert.True(Directory.Exists(backup));
+        Assert.True(vm.CanDeleteBackup);
+
+        vm.DeleteBackupCommand.Execute(null);
+
+        Assert.False(Directory.Exists(backup));
+        Assert.Null(vm.Summary!.BackupDirectory);
+        Assert.False(vm.CanDeleteBackup);
+    }
+
+    [Fact]
+    public async Task DeleteBackup_WithoutBackup_IsDisabled()
+    {
+        var dir = Path.Combine(_tempDir, "src8");
+        Directory.CreateDirectory(dir);
+        File.WriteAllText(Path.Combine(dir, "a.txt"), "hello");
+
+        var vm = CreateViewModel();
+        vm.SourceFolderPath = dir;
+        await vm.ScanCommand.ExecuteAsync(null);
+        await vm.ConvertCommand.ExecuteAsync(null);
+
+        // Non-in-place runs create no backup, so the command must not be executable.
+        Assert.Null(vm.Summary!.BackupDirectory);
+        Assert.False(vm.CanDeleteBackup);
+    }
+
+    [Fact]
+    public void DeleteBackupCommand_RaisesCanExecuteChangedWhenSummaryChanges()
+    {
+        var vm = CreateViewModel();
+        var canExecuteChanges = 0;
+        vm.DeleteBackupCommand.CanExecuteChanged += (_, _) => canExecuteChanges++;
+
+        // No backup yet: disabled.
+        Assert.False(vm.DeleteBackupCommand.CanExecute(null));
+
+        var backupDir = Path.Combine(_tempDir, "backup9");
+        Directory.CreateDirectory(backupDir);
+        File.WriteAllText(Path.Combine(backupDir, "a.txt"), "hello");
+
+        // A finished in-place run publishes its backup location through Summary.
+        vm.Summary = new ConversionSummary
+        {
+            Success = 1,
+            OutputPath = _tempDir,
+            BackupDirectory = backupDir
+        };
+
+        Assert.True(vm.CanDeleteBackup);
+        Assert.True(vm.DeleteBackupCommand.CanExecute(null));
+        // The command must be refreshed proactively; waiting for the next WPF
+        // CommandManager requery would leave the button stale.
+        Assert.True(canExecuteChanges >= 1, "setting Summary must raise CanExecuteChanged");
+
+        vm.DeleteBackupCommand.Execute(null);
+
+        Assert.False(Directory.Exists(backupDir));
+        Assert.Null(vm.Summary!.BackupDirectory);
+        Assert.False(vm.DeleteBackupCommand.CanExecute(null));
+        Assert.True(canExecuteChanges >= 2, "deleting the backup must raise CanExecuteChanged");
+    }
+
+    // ---- B9: "rescan" drops every piece of scan residue, not just the list ----
+
+    [Fact]
+    public void Reset_ClearsScanResidue()
+    {
+        var vm = CreateViewModel();
+        vm.IsOverwriteInPlace = true;
+        vm.HasConverted = true;
+
+        vm.ResetCommand.Execute(null);
+
+        Assert.False(vm.IsOverwriteInPlace);
+        Assert.False(vm.HasConverted);
+        Assert.Null(vm.SelectedFileItem);
+    }
+
+    // ---- B1: choices survive a close without an intervening scan ----
+
+    [Fact]
+    public void SaveSettings_PersistsChoicesWithoutScanning()
+    {
+        var dir = Path.Combine(_tempDir, "src6");
+        Directory.CreateDirectory(dir);
+        var settingsPath = Path.Combine(_tempDir, "settings-save.json");
+
+        var vm = new MainViewModel(new AppSettingsStore(settingsPath));
+        vm.SourceFolderPath = dir;
+        vm.SelectedEncoding = vm.AvailableEncodings.First(e => e.DisplayName == "GBK");
+        vm.ExtensionOptions.First(o => o.Extension == ".md").IsSelected = false;
+
+        // Wired to the window's Closing event.
+        vm.SaveSettings();
+
+        var reloaded = new MainViewModel(new AppSettingsStore(settingsPath));
+        Assert.Equal(dir, reloaded.SourceFolderPath);
+        Assert.Equal("GBK", reloaded.SelectedEncoding!.DisplayName);
+        Assert.False(reloaded.ExtensionOptions.First(o => o.Extension == ".md").IsSelected);
+    }
+
+    // ---- A1: repeated in-place conversion must never use a stale detection ----
+
+    [Fact]
+    public async Task ConvertAsync_TwiceInPlace_DoesNotCorruptContent()
+    {
+        var dir = Path.Combine(_tempDir, "src");
+        Directory.CreateDirectory(dir);
+        var gbk = Encoding.GetEncoding("GBK");
+        // Long enough for Ude to detect reliably (see CLAUDE.md).
+        var expected = "你好世界 Hello World 这是一段用于验证重复转换安全性的中文文本内容。";
+        var path = Path.Combine(dir, "a.txt");
+        File.WriteAllBytes(path, gbk.GetBytes(expected));
+
+        var vm = CreateViewModel();
+        vm.SourceFolderPath = dir;
+        vm.SelectedEncoding = vm.AvailableEncodings.First(e => e.DisplayName.Contains("无 BOM"));
+        vm.IsOverwriteInPlace = true;
+
+        await vm.ScanCommand.ExecuteAsync(null);
+        await vm.ConvertCommand.ExecuteAsync(null);
+        Assert.Equal(expected, File.ReadAllText(path, new UTF8Encoding(false)));
+
+        // A second run used to re-decode the already-UTF-8 bytes as GBK.
+        await vm.ConvertCommand.ExecuteAsync(null);
+
+        Assert.Equal(expected, File.ReadAllText(path, new UTF8Encoding(false)));
+    }
+
+    [Fact]
+    public async Task ConvertAsync_InPlace_RefreshesDetectedEncoding()
+    {
+        var dir = Path.Combine(_tempDir, "src2");
+        Directory.CreateDirectory(dir);
+        var gbk = Encoding.GetEncoding("GBK");
+        var text = "这是一段足够长的中文测试文本，用于让编码检测器能够可靠地识别出 UTF-8 编码。";
+        File.WriteAllBytes(Path.Combine(dir, "a.txt"), gbk.GetBytes(text));
+
+        var vm = CreateViewModel();
+        vm.SourceFolderPath = dir;
+        vm.SelectedEncoding = vm.AvailableEncodings.First(e => e.DisplayName.Contains("无 BOM"));
+        vm.IsOverwriteInPlace = true;
+        await vm.ScanCommand.ExecuteAsync(null);
+
+        var item = Assert.Single(vm.FileItems);
+        Assert.NotEqual(EncodingDetector.Utf8NoBomName, item.DetectedEncoding);
+
+        await vm.ConvertCommand.ExecuteAsync(null);
+
+        // The file is now UTF-8; the stale scan-time name must be gone.
+        Assert.Equal(EncodingDetector.Utf8NoBomName, item.DetectedEncoding);
+    }
+
+    [Fact]
+    public async Task HasConverted_BlocksConvertUntilRescan()
+    {
+        var dir = Path.Combine(_tempDir, "src3");
+        Directory.CreateDirectory(dir);
+        File.WriteAllText(Path.Combine(dir, "a.txt"), "hello");
+
+        var vm = CreateViewModel();
+        vm.SourceFolderPath = dir;
+        await vm.ScanCommand.ExecuteAsync(null);
+        Assert.True(vm.CanConvert);
+
+        // Set when the post-conversion re-detection could not run: converting
+        // again would decode with a stale encoding, so the button locks.
+        vm.HasConverted = true;
+        Assert.False(vm.CanConvert);
+
+        vm.ResetCommand.Execute(null);
+        vm.SourceFolderPath = dir;
+        await vm.ScanCommand.ExecuteAsync(null);
+        Assert.False(vm.HasConverted);
+        Assert.True(vm.CanConvert);
+    }
+
+    // ---- B3: the progress bar must deterministically reach 100% ----
+
+    [Fact]
+    public async Task ConvertAsync_ProgressReachesMaximum()
+    {
+        var dir = Path.Combine(_tempDir, "src4");
+        Directory.CreateDirectory(dir);
+        File.WriteAllText(Path.Combine(dir, "a.txt"), "hello");
+        File.WriteAllBytes(Path.Combine(dir, "img.png"), new byte[] { 0x89, 0x50 }); // unmatched
+
+        var vm = CreateViewModel();
+        vm.SourceFolderPath = dir;
+        await vm.ScanCommand.ExecuteAsync(null);
+        await vm.ConvertCommand.ExecuteAsync(null);
+
+        await WaitForProgressAsync(() => vm.ProgressValue, vm.ProgressMaximum);
+    }
+
+    // ---- B4: backup failures shrink the conversion list; the bar still completes ----
+
+    [Fact]
+    public async Task ConvertAsync_InPlaceWithBackupFailure_ProgressReachesMaximum()
+    {
+        var dir = Path.Combine(_tempDir, "src5");
+        Directory.CreateDirectory(dir);
+        var path = Path.Combine(dir, "locked.txt");
+        File.WriteAllText(path, "hello");
+
+        var vm = CreateViewModel();
+        vm.SourceFolderPath = dir;
+        vm.IsOverwriteInPlace = true;
+        await vm.ScanCommand.ExecuteAsync(null);
+
+        // Hold the file exclusively so the backup pass cannot copy it and the item
+        // is dropped from the conversion list.
+        using (File.Open(path, FileMode.Open, FileAccess.Read, FileShare.None))
+        {
+            await vm.ConvertCommand.ExecuteAsync(null);
+        }
+
+        await WaitForProgressAsync(() => vm.ProgressValue, vm.ProgressMaximum);
+    }
+
+    /// <summary>Progress&lt;T&gt; posts callbacks asynchronously when no SynchronizationContext
+    /// is captured (as under xUnit), so the terminal value can land just after the command
+    /// completes. Wait for it; without the terminal correction the value never arrives.</summary>
+    private static async Task WaitForProgressAsync(Func<int> value, int expected)
+    {
+        for (var attempt = 0; attempt < 200 && value() != expected; attempt++)
+            await Task.Delay(10);
+        Assert.Equal(expected, value());
     }
 
     private MainViewModel CreateViewModel()

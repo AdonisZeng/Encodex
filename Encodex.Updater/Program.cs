@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.IO.Compression;
+using System.Security.Cryptography;
 using System.Windows;
 
 namespace Encodex.Updater;
@@ -8,12 +9,16 @@ namespace Encodex.Updater;
 /// Standalone updater launched by the main app right before it exits.
 /// Waits for the main process to terminate (releasing its file locks),
 /// overwrites the install directory from the downloaded zip, then relaunches the app.
-/// Usage: Encodex.Updater.exe &lt;mainProcessId&gt; &lt;zipPath&gt; &lt;installDirectory&gt;
+/// Usage: Encodex.Updater.exe &lt;mainProcessId&gt; &lt;zipPath&gt; &lt;installDirectory&gt; [sha256]
+/// The fourth argument is optional so older Encodex versions (which pass only three)
+/// keep working; when present the package is verified against it before use.
 /// </summary>
 internal static class Program
 {
     private const string UpdaterBackupExtension = ".upd-old";
     private const string MainAppFileName = "Encodex.exe";
+    private const string UpdaterFileName = "Encodex.Updater.exe";
+    private const string StagingPrefix = "Encodex-upd-";
 
     /// <summary>Zone.Identifier ADS that Windows attaches to downloaded files.</summary>
     private const string ZoneIdentifierStream = ":Zone.Identifier";
@@ -25,11 +30,11 @@ internal static class Program
     {
         if (args.Length < 3)
         {
-            Console.Error.WriteLine("Usage: Encodex.Updater.exe <mainProcessId> <zipPath> <installDirectory>");
+            Console.Error.WriteLine("Usage: Encodex.Updater.exe <mainProcessId> <zipPath> <installDirectory> [sha256]");
             return 1;
         }
 
-        Log($"Updater started: pid={args[0]}, zip={args[1]}, dir={args[2]}");
+        Log($"Updater started: pid={args[0]}, zip={args[1]}, dir={args[2]}, sha={(args.Length >= 4 ? "<provided>" : "<none>")}");
 
         // All path handling happens inside the try block: a malformed argument
         // (see ResolveInstallDirectory) must surface as a dialog plus log, never
@@ -39,9 +44,10 @@ internal static class Program
         {
             var installDirectory = ResolveInstallDirectory(args[2]);
             var zipPath = ResolveZipPath(args[1]);
+            var expectedSha256 = SanitizePathArgument(args.Length >= 4 ? args[3] : null);
             appPath = Path.Combine(installDirectory, MainAppFileName);
 
-            if (!Run(int.Parse(args[0]), zipPath, installDirectory))
+            if (!Run(int.Parse(args[0]), zipPath, installDirectory, expectedSha256))
             {
                 // Aborted because the main app is still running: do NOT restart it
                 // here, that would spawn a second instance.
@@ -65,12 +71,12 @@ internal static class Program
     }
 
     /// <summary>
-    /// Waits for the main process, removes stale updater backups, extracts the zip
-    /// and relaunches the app.
+    /// Waits for the main process, verifies and stages the package, swaps the staged
+    /// files into place (rolling back on any failure) and relaunches the app.
     /// </summary>
     /// <returns>false when the update was aborted because the main process did not
     /// exit within the wait window; the main app is still running in that case.</returns>
-    private static bool Run(int mainProcessId, string zipPath, string installDirectory)
+    private static bool Run(int mainProcessId, string zipPath, string installDirectory, string? expectedSha256)
     {
         if (!WaitForProcessExit(mainProcessId))
         {
@@ -78,48 +84,217 @@ internal static class Program
             return false;
         }
 
-        // Leftovers from a previous updater self-replacement; safe to delete now.
+        // Leftovers from a previous updater run; safe to delete now. This also covers a
+        // staging folder left behind by an updater that crashed before its finally ran.
         DeleteFilesWithExtension(installDirectory, UpdaterBackupExtension);
+        CleanupStaleStagingDirectories(installDirectory);
 
-        var updaterPath = Path.Combine(installDirectory, "Encodex.Updater.exe");
-        var extractedUpdater = Extract(installDirectory, zipPath, updaterPath);
-
-        // Self-replace if the zip ships a newer updater: the running updater's own exe
-        // is locked, but renaming a running exe is allowed, so move the old one aside
-        // and swap the new one in.
-        if (extractedUpdater != null && !string.Equals(
-                extractedUpdater, updaterPath, StringComparison.OrdinalIgnoreCase))
+        var stagingDirectory = CreateStagingDirectory(installDirectory);
+        try
         {
-            var backup = updaterPath + UpdaterBackupExtension;
-            var movedOldAside = false;
-            if (File.Exists(updaterPath))
-            {
-                Retry(() => File.Move(updaterPath, backup), $"备份旧更新器 {updaterPath}");
-                movedOldAside = true;
-            }
+            // One handle for hashing and extracting: once the stream is open, a file
+            // swapped on disk cannot change what is read from it, which closes the
+            // verify-then-open window a hostile local process could otherwise use.
+            using var package = OpenPackageStream(zipPath);
+            VerifySha256(package, expectedSha256);
+            using var archive = new ZipArchive(package, ZipArchiveMode.Read, leaveOpen: true);
 
+            ExtractInto(archive, stagingDirectory);
+
+            // Swap every staged file into place, parking each replaced original as
+            // *.upd-old so a failure rolls back to a fully consistent previous state
+            // instead of leaving a half-new install directory behind.
+            var undo = new List<(string Installed, string? Backup)>();
             try
             {
-                Retry(() => File.Move(extractedUpdater, updaterPath), $"替换更新器 {extractedUpdater}");
+                ApplyStagedFiles(stagingDirectory, installDirectory, undo);
             }
             catch
             {
-                // The old exe is already moved aside; restore it so the updater is not
-                // permanently lost when swapping the new one in fails.
-                if (movedOldAside)
-                {
-                    try { Retry(() => File.Move(backup, updaterPath), $"恢复旧更新器 {updaterPath}"); }
-                    catch (Exception rollbackEx) { Log($"回滚更新器失败: {rollbackEx}"); }
-                }
+                Rollback(undo);
                 throw;
             }
 
-            TryDelete(extractedUpdater);
+            // The swap succeeded, so the per-file backups are no longer needed. Delete
+            // them BEFORE relaunching: leftover *.upd-old at startup must mean a crashed
+            // update (DetectFailedUpdate relies on that signal), and keeping them would
+            // hold a second copy of the app in the install folder indefinitely.
+            DeleteFilesWithExtension(installDirectory, UpdaterBackupExtension);
+
+            Log("Relaunching Encodex.exe");
+            TryStart(appPath: Path.Combine(installDirectory, MainAppFileName));
+            return true;
+        }
+        finally
+        {
+            TryDeleteDirectory(stagingDirectory);
+        }
+    }
+
+    /// <summary>
+    /// Creates a staging directory on the same volume as the install directory, which
+    /// is what makes the later per-file swaps atomic and cheap. A sibling of the
+    /// install directory is used so the staging folder is never part of the tree it
+    /// replaces; a drive root has no parent, so it falls back to a subfolder inside.
+    /// </summary>
+    private static string CreateStagingDirectory(string installDirectory)
+    {
+        var root = GetStagingRoot(installDirectory);
+
+        var stamp = DateTime.Now.ToString("yyyyMMdd-HHmmss");
+        var staging = Path.Combine(root, StagingPrefix + stamp);
+        for (var suffix = 2; Directory.Exists(staging); suffix++)
+            staging = Path.Combine(root, $"{StagingPrefix}{stamp}-{suffix}");
+
+        Directory.CreateDirectory(staging);
+        Log($"暂存目录: {staging}");
+        return staging;
+    }
+
+    /// <summary>The parent directory staging folders are created in (the install
+    /// directory itself when it is a drive root with no parent).</summary>
+    private static string GetStagingRoot(string installDirectory)
+    {
+        var trimmed = installDirectory.TrimEnd('\\');
+        var parent = Path.GetDirectoryName(trimmed);
+        return string.IsNullOrEmpty(parent) ? trimmed : parent;
+    }
+
+    /// <summary>
+    /// Removes staging folders ("Encodex-upd-*") that an updater crash left in the
+    /// install directory's parent. Best-effort: a folder that cannot be deleted is
+    /// simply retried on the next update run. Only stale siblings are touched; the
+    /// live install directory itself is never at risk.
+    /// </summary>
+    internal static void CleanupStaleStagingDirectories(string installDirectory)
+    {
+        try
+        {
+            var root = GetStagingRoot(installDirectory);
+            foreach (var stale in Directory.GetDirectories(root, StagingPrefix + "*"))
+                TryDeleteDirectory(stale);
+        }
+        catch
+        {
+            // Best effort only: a stale staging folder is cleaned up next run.
+        }
+    }
+
+    /// <summary>
+    /// Extracts every entry of the archive into the staging directory, applying the
+    /// path-traversal guard against the staging root.
+    /// </summary>
+    private static void ExtractInto(ZipArchive archive, string stagingDirectory)
+    {
+        foreach (var entry in archive.Entries)
+        {
+            if (IsSkippableEntry(entry.Name))
+            {
+                if (!string.IsNullOrEmpty(entry.Name))
+                    Log($"跳过异常压缩包条目: {entry.FullName}");
+                continue;
+            }
+
+            var destination = ResolveEntryPath(stagingDirectory, entry.FullName);
+            var directory = Path.GetDirectoryName(destination);
+            if (directory != null)
+                Directory.CreateDirectory(directory);
+
+            Retry(() => entry.ExtractToFile(destination, overwrite: true), $"解压 {entry.FullName}");
+            UnblockFile(destination);
+        }
+    }
+
+    /// <summary>
+    /// Directory entries (empty name) carry no payload, and "." / ".." are malformed
+    /// names that would make the destination's parent directory resolve to nothing.
+    /// Both are skipped instead of crashing the updater.
+    /// </summary>
+    internal static bool IsSkippableEntry(string? entryName) =>
+        string.IsNullOrEmpty(entryName) || entryName is "." or "..";
+
+    /// <summary>
+    /// Moves every staged file into its place in the install directory. Files that
+    /// already exist are swapped atomically via <see cref="File.Replace"/>, with the
+    /// original parked as *.upd-old so <paramref name="undo"/> can restore it. The
+    /// running updater's own executable is replaced last: a running image cannot be
+    /// written to, but it can be renamed aside and a fresh one moved in.
+    /// </summary>
+    private static void ApplyStagedFiles(
+        string stagingDirectory,
+        string installDirectory,
+        List<(string Installed, string? Backup)> undo)
+    {
+        var stagingPrefix = stagingDirectory.TrimEnd('\\') + "\\";
+        var updaterPath = Path.Combine(installDirectory, UpdaterFileName);
+        string? stagedUpdater = null;
+
+        foreach (var staged in Directory.GetFiles(stagingDirectory, "*", SearchOption.AllDirectories))
+        {
+            var relative = staged.Substring(stagingPrefix.Length);
+            if (string.Equals(Path.Combine(installDirectory, relative), updaterPath, StringComparison.OrdinalIgnoreCase))
+            {
+                stagedUpdater = staged;
+                continue;
+            }
+
+            InstallStagedFile(staged, relative, installDirectory, undo);
         }
 
-        Log("Relaunching Encodex.exe");
-        TryStart(appPath: Path.Combine(installDirectory, MainAppFileName));
-        return true;
+        if (stagedUpdater != null)
+            InstallStagedFile(stagedUpdater, UpdaterFileName, installDirectory, undo);
+    }
+
+    private static void InstallStagedFile(
+        string staged,
+        string relative,
+        string installDirectory,
+        List<(string Installed, string? Backup)> undo)
+    {
+        var target = Path.GetFullPath(Path.Combine(installDirectory, relative));
+        if (!target.StartsWith(installDirectory.TrimEnd('\\') + "\\", StringComparison.OrdinalIgnoreCase))
+            throw new IOException($"暂存文件越出安装目录: {relative}");
+
+        var directory = Path.GetDirectoryName(target);
+        if (directory != null)
+            Directory.CreateDirectory(directory);
+
+        if (File.Exists(target))
+        {
+            // Atomic: the destination is never momentarily absent, and the original
+            // lands in the backup name so a rollback can restore it.
+            var backup = target + UpdaterBackupExtension;
+            Retry(() => File.Replace(staged, target, backup), $"替换 {relative}");
+            undo.Add((target, backup));
+        }
+        else
+        {
+            Retry(() => File.Move(staged, target), $"安装 {relative}");
+            undo.Add((target, null));
+        }
+        UnblockFile(target);
+    }
+
+    /// <summary>Restores the install directory to its pre-update state by undoing every
+    /// completed swap, newest first, so a partial failure never ships.</summary>
+    private static void Rollback(List<(string Installed, string? Backup)> undo)
+    {
+        Log($"替换失败，回滚 {undo.Count} 个文件");
+        for (var i = undo.Count - 1; i >= 0; i--)
+        {
+            var (installed, backup) = undo[i];
+            try
+            {
+                if (File.Exists(installed))
+                    File.Delete(installed);
+                if (backup != null)
+                    File.Move(backup, installed);
+            }
+            catch (Exception ex)
+            {
+                Log($"回滚 {installed} 失败: {ex.Message}");
+            }
+        }
     }
 
     /// <summary>
@@ -208,53 +383,34 @@ internal static class Program
         }
     }
 
+    private static FileStream OpenPackageStream(string zipPath) =>
+        new(zipPath, FileMode.Open, FileAccess.Read, FileShare.Read, 64 * 1024);
+
     /// <summary>
-    /// Extracts every entry of the zip into <paramref name="installDirectory"/>,
-    /// overwriting existing files. .NET Framework has no overwrite-capable
-    /// ExtractToDirectory, so entries are extracted one by one.
+    /// Verifies the package against the expected SHA-256. The hash is computed over
+    /// the same stream the archive is then read from, so verifying and using the
+    /// package are one indivisible step — the verify-then-open window is gone.
     /// </summary>
-    /// <returns>
-    /// The destination path of the updater exe entry, or null if the zip does not
-    /// contain one. If the destination is locked by this running process the entry
-    /// is extracted to a temp location and returned for later self-replacement.
-    /// </returns>
-    private static string? Extract(string installDirectory, string zipPath, string lockedUpdaterPath)
+    internal static void VerifySha256(Stream package, string? expectedSha256)
     {
-        string? updaterDestination = null;
+        if (expectedSha256 is not { } expected || string.IsNullOrWhiteSpace(expected))
+            return; // Older main app versions do not pass a hash.
 
-        using (var archive = ZipFile.OpenRead(zipPath))
-        {
-            foreach (var entry in archive.Entries)
-            {
-                if (string.IsNullOrEmpty(entry.Name))
-                    continue; // Directory entry.
+        using var sha = SHA256.Create();
+        var hash = sha.ComputeHash(package);
+        package.Seek(0, SeekOrigin.Begin);
 
-                var destination = ResolveEntryPath(installDirectory, entry.FullName);
-
-                Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
-
-                if (string.Equals(destination, lockedUpdaterPath, StringComparison.OrdinalIgnoreCase))
-                {
-                    // The running updater locks its own exe: extract aside instead.
-                    destination += ".new";
-                    updaterDestination = destination;
-                }
-                else if (updaterDestination == null &&
-                         Path.GetFileName(destination).Equals("Encodex.Updater.exe", StringComparison.OrdinalIgnoreCase))
-                {
-                    updaterDestination = destination;
-                }
-
-                Retry(() => entry.ExtractToFile(destination, overwrite: true), $"解压 {entry.FullName}");
-                UnblockFile(destination);
-            }
-        }
-
-        return updaterDestination;
+        var actual = BitConverter.ToString(hash).Replace("-", "").ToLowerInvariant();
+        // The manifest may write the hash with dash/colon separators and mixed case;
+        // normalize before comparing so a purely cosmetic format difference is not
+        // reported as a corrupted package.
+        var normalizedExpected = expected.Trim().Replace("-", "").Replace(":", "");
+        if (!string.Equals(actual, normalizedExpected, StringComparison.OrdinalIgnoreCase))
+            throw new IOException("更新包校验失败（SHA-256 不一致），文件可能已被篡改或损坏。");
     }
 
     /// <summary>
-    /// Resolves a zip entry's destination inside the install directory, rejecting any
+    /// Resolves a zip entry's destination inside the staging directory, rejecting any
     /// entry that would escape it (traversal via "..", absolute paths, or alternate
     /// separators). Extracted for testability of the path-traversal guard.
     /// </summary>
@@ -301,12 +457,6 @@ internal static class Program
         catch { /* No ADS present or not deletable: harmless. */ }
     }
 
-    private static void TryDelete(string path)
-    {
-        try { File.Delete(path); }
-        catch { /* Best effort only. */ }
-    }
-
     private static void TryStart(string appPath)
     {
         try
@@ -319,12 +469,26 @@ internal static class Program
         }
     }
 
-    private static void DeleteFilesWithExtension(string directory, string extension)
+    private static void TryDelete(string path)
+    {
+        try { File.Delete(path); }
+        catch { /* Best effort only. */ }
+    }
+
+    private static void TryDeleteDirectory(string path)
+    {
+        try { if (Directory.Exists(path)) Directory.Delete(path, recursive: true); }
+        catch { /* Best effort: a stale staging folder is cleaned up next run. */ }
+    }
+
+    /// <summary>Deletes every file with the given extension below <paramref name="directory"/>
+    /// (recursive, since staged files and their backups can live in subdirectories).</summary>
+    internal static void DeleteFilesWithExtension(string directory, string extension)
     {
         if (!Directory.Exists(directory))
             return;
 
-        foreach (var file in Directory.GetFiles(directory, "*" + extension))
+        foreach (var file in Directory.GetFiles(directory, "*" + extension, SearchOption.AllDirectories))
             TryDelete(file);
     }
 

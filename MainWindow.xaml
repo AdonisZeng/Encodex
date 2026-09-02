@@ -229,19 +229,23 @@
                             </ItemsControl.ItemTemplate>
                         </ItemsControl>
 
-                        <TextBlock Text="{Binding BackupDirectoryText}" TextWrapping="Wrap" Margin="0,0,0,8">
-                            <TextBlock.Style>
-                                <Style TargetType="TextBlock">
-                                    <Setter Property="Foreground" Value="#C8A415"/>
-                                    <Setter Property="Visibility" Value="Visible"/>
+                        <!-- In-place backup notice + cleanup: hidden entirely when there
+                             is no backup (non-in-place runs), shown otherwise. -->
+                        <StackPanel Margin="0,0,0,8">
+                            <StackPanel.Style>
+                                <Style TargetType="StackPanel">
                                     <Style.Triggers>
                                         <DataTrigger Binding="{Binding BackupDirectoryText}" Value="{x:Null}">
                                             <Setter Property="Visibility" Value="Collapsed"/>
                                         </DataTrigger>
                                     </Style.Triggers>
                                 </Style>
-                            </TextBlock.Style>
-                        </TextBlock>
+                            </StackPanel.Style>
+                            <TextBlock Text="{Binding BackupDirectoryText}" TextWrapping="Wrap"
+                                       Foreground="#C8A415" Margin="0,0,0,6"/>
+                            <ui:Button Content="{x:Static r:Res.Ui_DeleteBackup}"
+                                       Command="{Binding DeleteBackupCommand}" Padding="12,4"/>
+                        </StackPanel>
 
                         <TextBlock Text="{x:Static r:Res.Ui_OutputDir}" FontWeight="SemiBold" Margin="0,0,0,4"/>
                         <DockPanel Margin="0,0,0,24">

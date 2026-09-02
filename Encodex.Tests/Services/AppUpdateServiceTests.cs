@@ -114,13 +114,37 @@ public class AppUpdateServiceTests
         var info = new UpdateInfo
         {
             Version = new Version(9, 9, 9, 8),
-            DownloadUrl = "http://x/z.zip",
+            DownloadUrl = "https://x/z.zip",
             Sha256 = new string('0', 64)
         };
 
         var ex = await Assert.ThrowsAsync<UpdateException>(() => service.DownloadAsync(info));
 
         Assert.Contains("SHA-256", ex.Message);
+    }
+
+    // ---- D3: the package that becomes the running app must not travel in the clear ----
+
+    [Theory]
+    [InlineData("http://x/z.zip")]
+    [InlineData("ftp://x/z.zip")]
+    [InlineData("not a url")]
+    [InlineData("")]
+    public async Task DownloadAsync_NonHttpsUrl_IsRejectedBeforeAnyRequest(string url)
+    {
+        var requests = 0;
+        var handler = new FakeHttpMessageHandler(_ =>
+        {
+            Interlocked.Increment(ref requests);
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(new byte[1]) };
+        });
+        var service = new AppUpdateService("http://localhost/update.xml", new HttpClient(handler));
+        var info = new UpdateInfo { Version = new Version(9, 9, 9, 9), DownloadUrl = url };
+
+        var ex = await Assert.ThrowsAsync<UpdateException>(() => service.DownloadAsync(info));
+
+        Assert.Contains("HTTPS", ex.Message);
+        Assert.Equal(0, requests);
     }
 
     [Fact]
@@ -132,7 +156,7 @@ public class AppUpdateServiceTests
         var info = new UpdateInfo
         {
             Version = new Version(9, 9, 9, 9),
-            DownloadUrl = "http://x/z.zip",
+            DownloadUrl = "https://x/z.zip",
             Sha256 = sha.ToUpperInvariant()   // comparison must be case-insensitive
         };
 
@@ -155,7 +179,7 @@ public class AppUpdateServiceTests
         var info = new UpdateInfo
         {
             Version = new Version(9, 9, 9, 7),
-            DownloadUrl = "http://x/z.zip",
+            DownloadUrl = "https://x/z.zip",
             Sha256 = ComputeSha256Hex(bytes)
         };
 
@@ -174,7 +198,100 @@ public class AppUpdateServiceTests
         }
     }
 
+    // ---- F1: DetectFailedUpdate must recognize the new updater's leftovers ----
+
+    [Fact]
+    public void DetectFailedUpdate_NoLeftovers_ReturnsNull()
+    {
+        var dir = CreateTempDirectory();
+        try
+        {
+            Assert.Null(AppUpdateService.DetectFailedUpdate(dir));
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void DetectFailedUpdate_UpdOldLeftover_DetectedAndCleaned()
+    {
+        var dir = CreateTempDirectory();
+        try
+        {
+            // The current updater parks replaced originals as *.upd-old and deletes them
+            // on success; their presence (even nested) means a crash mid-replacement.
+            var leftover = Path.Combine(dir, "sub", "Encodex.dll.upd-old");
+            Directory.CreateDirectory(Path.GetDirectoryName(leftover)!);
+            File.WriteAllText(leftover, "old version");
+
+            var message = AppUpdateService.DetectFailedUpdate(dir);
+
+            Assert.NotNull(message);
+            Assert.False(File.Exists(leftover));
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void DetectFailedUpdate_LegacyNewLeftover_StillDetectedAndCleaned()
+    {
+        // Older updater versions left Encodex.Updater.exe.new; keep detecting that
+        // marker so a machine with a legacy leftover still gets the notice once.
+        var dir = CreateTempDirectory();
+        try
+        {
+            var leftover = Path.Combine(dir, "Encodex.Updater.exe.new");
+            File.WriteAllText(leftover, "new version");
+
+            var message = AppUpdateService.DetectFailedUpdate(dir);
+
+            Assert.NotNull(message);
+            Assert.False(File.Exists(leftover));
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void DetectFailedUpdate_MissingDirectory_ReturnsNull()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "encodex-no-such-dir-" + Guid.NewGuid().ToString("N"));
+
+        Assert.Null(AppUpdateService.DetectFailedUpdate(dir));
+    }
+
+    // ---- A2: the updater is handed the package hash so it can re-verify it ----
+
+    [Fact]
+    public void ApplyUpdateAndExit_ArgumentList_ContainsSha256AsFourthArgument()
+    {
+        var sha = new string('a', 64);
+        var commandLine = string.Join(" ", new[]
+        {
+            "12345",
+            AppUpdateService.QuoteWindowsArgument("C:\\temp\\z.zip"),
+            AppUpdateService.QuoteWindowsArgument("C:\\Program Files\\Encodex\\"),
+            AppUpdateService.QuoteWindowsArgument(sha)
+        });
+
+        Assert.Equal(sha, ParseCommandLine(commandLine)[3]);
+    }
+
     // ---- helpers ----
+
+    private static string CreateTempDirectory()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "encodex-upd-svc-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        return dir;
+    }
 
     private static AppUpdateService CreateService(string xml)
     {

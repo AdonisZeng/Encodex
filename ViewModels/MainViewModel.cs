@@ -16,7 +16,6 @@ public partial class MainViewModel : ObservableObject
     private readonly FileScanner _scanner = new();
     private readonly EncodingDetector _detector = new();
     private readonly EncodingConverter _converter = new();
-    private readonly ExtensionProfile _extensionProfile = new();
     private readonly AppUpdateService _updateService = new();
     private readonly AppSettingsStore _settingsStore;
     private CancellationTokenSource? _cts;
@@ -67,6 +66,13 @@ public partial class MainViewModel : ObservableObject
     [NotifyCanExecuteChangedFor(nameof(CheckForUpdatesCommand))]
     private bool _isCheckingUpdates;
 
+    /// <summary>Set when a finished conversion could not re-detect the encodings it
+    /// rewrote in place: converting again would decode with a stale encoding and
+    /// corrupt the content, so the button locks until a fresh scan.</summary>
+    [ObservableProperty]
+    [NotifyCanExecuteChangedFor(nameof(ConvertCommand))]
+    private bool _hasConverted;
+
     [ObservableProperty]
     private int _progressValue;
 
@@ -89,13 +95,17 @@ public partial class MainViewModel : ObservableObject
 
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(BackupDirectoryText))]
+    [NotifyCanExecuteChangedFor(nameof(DeleteBackupCommand))]
     private ConversionSummary? _summary;
 
     public ObservableCollection<EncodingOption> AvailableEncodings { get; }
     public ObservableCollection<ExtensionOption> ExtensionOptions { get; }
     public ObservableCollection<ExtensionGroup> ExtensionGroups { get; } = new();
     public ObservableCollection<ReportSection> ReportSections { get; } = new();
-    public ObservableCollection<FileConversionItem> FileItems { get; } = new();
+
+    /// <summary>Range-addable so a large scan fills the list with one UI notification
+    /// instead of one per file.</summary>
+    public RangeObservableCollection<FileConversionItem> FileItems { get; } = new();
 
     /// <summary>Icon shown on the theme toggle button: the theme the button switches to.</summary>
     public string ThemeIcon => IsLightTheme ? "🌙" : "☀️";
@@ -139,7 +149,7 @@ public partial class MainViewModel : ObservableObject
     }
 
     public bool CanScan => !string.IsNullOrEmpty(SourceFolderPath) && !IsConverting && !IsScanning;
-    public bool CanConvert => FileItems.Count > 0 && !IsConverting;
+    public bool CanConvert => FileItems.Count > 0 && !IsConverting && !HasConverted;
     public bool CanCancel => IsConverting;
     public bool CanReset => !IsScanning && !IsConverting;
     // While a download is running the update button doubles as "cancel download".
@@ -187,8 +197,10 @@ public partial class MainViewModel : ObservableObject
         }
     }
 
-    /// <summary>Persists the current configuration so the next launch restores it.</summary>
-    private void SaveSettings()
+    /// <summary>Persists the current configuration so the next launch restores it.
+    /// Public so the window can flush the settings when it closes — a user who picks
+    /// a folder or toggles extensions and quits must not lose that configuration.</summary>
+    public void SaveSettings()
     {
         // Anything outside the default set came from the user and must survive restarts.
         var defaults = new HashSet<string>(ExtensionProfile.GetDefaultExtensions());
@@ -225,6 +237,7 @@ public partial class MainViewModel : ObservableObject
 
         IsScanning = true;
         FileItems.Clear();
+        HasConverted = false;
         StatusText = Res.VM_Scanning;
 
         try
@@ -234,14 +247,24 @@ public partial class MainViewModel : ObservableObject
             var profile = SnapshotProfile();
             var targetEncodingName = SelectedEncoding!.DisplayName;
 
-            // Scanning and per-file detection are CPU/IO heavy: keep them off the UI thread.
+            // Scanning and per-file detection are CPU/IO heavy: keep them off the UI
+            // thread, and detect concurrently — each call is independent (local state
+            // only) and the phase is disk-bound, so it parallelizes like the conversion.
             var (matched, unmatched, items) = await Task.Run(() =>
             {
                 var (m, u) = _scanner.ScanAll(path, profile);
-                var list = new List<FileConversionItem>();
-                foreach (var file in m)
+
+                var detected = new (FileScanResult File, DetectionResult Result)[m.Count];
+                Parallel.For(0, m.Count, new ParallelOptions
                 {
-                    var detection = _detector.Detect(file.FullPath);
+                    MaxDegreeOfParallelism = Math.Min(Environment.ProcessorCount, EncodingConverter.MaxConcurrency)
+                }, i => detected[i] = (m[i], _detector.Detect(m[i].FullPath)));
+
+                // Detected in parallel, assembled in scan order so the list keeps the
+                // order the user saw before this change.
+                var list = new List<FileConversionItem>(m.Count);
+                foreach (var (file, detection) in detected)
+                {
                     list.Add(new FileConversionItem
                     {
                         RelativePath = file.RelativePath,
@@ -257,8 +280,8 @@ public partial class MainViewModel : ObservableObject
             });
 
             _unmatchedFiles = unmatched;
-            foreach (var item in items)
-                FileItems.Add(item);
+            // One CollectionChanged notification instead of one per file.
+            FileItems.AddRange(items);
 
             OnPropertyChanged(nameof(ScannedCountText));
             SelectedTabIndex = 1;
@@ -300,7 +323,7 @@ public partial class MainViewModel : ObservableObject
             // Snapshot before any await: the user can change the mode while running.
             var overwriteInPlace = IsOverwriteInPlace;
             var sourceFolderName = Path.GetFileName(SourceFolderPath);
-            var encodingName = GetEncodingFolderName(SelectedEncoding!.Encoding);
+            var encodingName = EncodingConverter.GetEncodingFolderName(SelectedEncoding!.Encoding);
 
             if (overwriteInPlace)
             {
@@ -346,9 +369,13 @@ public partial class MainViewModel : ObservableObject
             var encoding = SelectedEncoding!.Encoding;
             var unmatchedFiles = _unmatchedFiles;
 
+            // Progress callbacks are posted asynchronously and can land after the
+            // terminal write below. Phases report monotonically increasing values,
+            // so taking the running maximum makes the result independent of the
+            // order in which callbacks are delivered.
             var progress = new Progress<ConversionProgress>(p =>
             {
-                ProgressValue = p.Processed;
+                ProgressValue = Math.Max(ProgressValue, p.Processed);
                 CurrentFileName = p.CurrentFile;
             });
 
@@ -381,6 +408,11 @@ public partial class MainViewModel : ObservableObject
                     _cts.Token), _cts.Token);
             }
 
+            // Both phases report their own running total; a backup failure shrinks the
+            // conversion list and the copy loop reports one short. Snap the bar to full
+            // here so it always ends at 100% regardless of what either phase skipped.
+            ProgressValue = ProgressMaximum;
+
             Summary = new ConversionSummary
             {
                 Success = summary.Success,
@@ -391,6 +423,12 @@ public partial class MainViewModel : ObservableObject
                 BackupDirectory = summary.BackupDirectory
             };
             BuildReportSections(copyResult);
+
+            // In-place conversion rewrote the source files, so the scan-time
+            // DetectedEncoding is stale: converting again from it would decode the
+            // new bytes with the old encoding and corrupt the content.
+            if (overwriteInPlace && !await RefreshDetectedEncodingsAsync(selectedItems, sourcePath))
+                HasConverted = true;
 
             SelectedTabIndex = 3;
             StatusText = string.Format(Res.VM_ConvertDone,
@@ -470,29 +508,42 @@ public partial class MainViewModel : ObservableObject
         if (dialog.ShowDialog() != true || string.IsNullOrWhiteSpace(dialog.ExtensionInput))
             return;
 
-        if (!TryAddExtension(group, dialog.ExtensionInput))
+        var input = dialog.ExtensionInput.Trim();
+        switch (TryAddExtension(group, input))
         {
-            MessageBox.Show(
-                string.Format(Res.VM_InvalidExtension, dialog.ExtensionInput.Trim()),
-                Res.VM_AddExtensionTitle, MessageBoxButton.OK, MessageBoxImage.Warning);
+            case ExtensionAddResult.Added:
+                return;
+            case ExtensionAddResult.Duplicate:
+                MessageBox.Show(
+                    string.Format(Res.VM_DuplicateExtension, input),
+                    Res.VM_AddExtensionTitle, MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
+            default:
+                MessageBox.Show(
+                    string.Format(Res.VM_InvalidExtension, input),
+                    Res.VM_AddExtensionTitle, MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
         }
     }
 
-    /// <summary>Adds a custom extension to the profile and to the given group.</summary>
-    public bool TryAddExtension(ExtensionGroup group, string input)
+    /// <summary>
+    /// Validates and appends a user-entered extension. <see cref="ExtensionOptions"/> is
+    /// the single authoritative set: validation is a pure call to
+    /// <see cref="ExtensionProfile.TryNormalize"/>, so nothing is mutated when the input
+    /// turns out to be a duplicate or invalid.
+    /// </summary>
+    public ExtensionAddResult TryAddExtension(ExtensionGroup group, string input)
     {
-        if (!_extensionProfile.AddExtension(input, out var normalized))
-            return false;
+        if (!ExtensionProfile.TryNormalize(input, out var normalized))
+            return ExtensionAddResult.Invalid;
 
-        // The profile is rebuilt with defaults on every launch, so it can miss
-        // extensions restored from settings; ExtensionOptions is the authoritative set.
         if (ExtensionOptions.Any(o => o.Extension == normalized))
-            return false;
+            return ExtensionAddResult.Duplicate;
 
         var option = new ExtensionOption(normalized);
         ExtensionOptions.Add(option);
         group.Extensions.Add(option);
-        return true;
+        return ExtensionAddResult.Added;
     }
 
     /// <summary>Builds the expandable report sections with concrete file lists.
@@ -524,10 +575,55 @@ public partial class MainViewModel : ObservableObject
         ReportSections.Add(new ReportSection("📄", Res.VM_CopiedSection, copied));
     }
 
-    /// <summary>Folder name for the output directory; distinguishes BOM variants that
-    /// share the same WebName (UTF-8 with/without BOM are both "utf-8").</summary>
-    private static string GetEncodingFolderName(Encoding encoding)
-        => encoding.GetPreamble().Length > 0 ? encoding.WebName + "-bom" : encoding.WebName;
+    /// <summary>
+    /// Re-detects the encoding of files that were rewritten in place. The scan-time
+    /// <see cref="FileConversionItem.DetectedEncoding"/> describes the file's previous
+    /// content; converting again from it would decode the new bytes with the old
+    /// encoding and produce mojibake. Returns false when the refresh could not
+    /// complete, in which case the caller must lock conversion until a fresh scan.
+    /// </summary>
+    private async Task<bool> RefreshDetectedEncodingsAsync(
+        IReadOnlyList<FileConversionItem> items, string sourceDirectory)
+    {
+        // Only files actually rewritten in place need a refresh: Copied/Skipped/Failed
+        // items still hold their original bytes.
+        var rewritten = items.Where(i => i.Status == ConversionStatus.Success).ToList();
+        if (rewritten.Count == 0)
+            return true;
+
+        try
+        {
+            // Detection is file I/O: keep it off the UI thread and detect concurrently
+            // (each call is independent), matching the scan phase's parallelization.
+            // Results land in per-index slots so the list keeps the input order.
+            var refreshed = await Task.Run(() =>
+            {
+                var results = new (FileConversionItem Item, string? Encoding)[rewritten.Count];
+                Parallel.For(0, rewritten.Count, new ParallelOptions
+                {
+                    MaxDegreeOfParallelism = Math.Min(Environment.ProcessorCount, EncodingConverter.MaxConcurrency)
+                }, i =>
+                {
+                    var detection = _detector.Detect(Path.Combine(sourceDirectory, rewritten[i].RelativePath));
+                    results[i] = (rewritten[i], detection.EncodingName);
+                });
+                return results;
+            });
+
+            // Re-assigned on the UI thread so the property-change notifications keep
+            // their current thread affinity.
+            foreach (var (item, encoding) in refreshed)
+                item.DetectedEncoding = encoding;
+            return true;
+        }
+        catch
+        {
+            // A file that cannot be re-read after the rewrite must not be converted
+            // again: its DetectedEncoding is stale and decoding it would corrupt it.
+            StatusText = Res.VM_RefreshFailed;
+            return false;
+        }
+    }
 
     /// <summary>Builds a best-effort report from files processed before a cancellation,
     /// so partial results are shown instead of being discarded.</summary>
@@ -570,10 +666,54 @@ public partial class MainViewModel : ObservableObject
         }
     }
 
+    public bool CanDeleteBackup => Summary?.BackupDirectory is { Length: > 0 };
+
+    /// <summary>
+    /// Removes the temporary in-place backup. Nothing else ever deletes it, so a few
+    /// large conversions would otherwise leave gigabytes behind in %TEMP% until the
+    /// user runs a disk cleanup by hand.
+    /// </summary>
+    [RelayCommand(CanExecute = nameof(CanDeleteBackup))]
+    private void DeleteBackup()
+    {
+        var backup = Summary?.BackupDirectory;
+        if (string.IsNullOrEmpty(backup))
+            return;
+
+        try
+        {
+            Directory.Delete(backup, recursive: true);
+
+            // ConversionSummary has init-only properties, so a fresh instance replaces
+            // the old one; clearing BackupDirectory hides the notice and disables the button.
+            Summary = new ConversionSummary
+            {
+                Success = Summary!.Success,
+                Skipped = Summary.Skipped,
+                Failed = Summary.Failed,
+                Copied = Summary.Copied,
+                OutputPath = Summary.OutputPath,
+                BackupDirectory = null
+            };
+            StatusText = string.Format(Res.VM_BackupDeleted, backup);
+        }
+        catch (Exception ex)
+        {
+            StatusText = string.Format(Res.VM_BackupDeleteFailed, ex.Message);
+        }
+    }
+
     [RelayCommand(CanExecute = nameof(CanReset))]
     private void Reset()
     {
         FileItems.Clear();
+        // A stale unmatched list would be copied into the next conversion run, and a
+        // stale in-place flag could rewrite files the user no longer expects: every
+        // piece of scan state is dropped, not just the visible list.
+        _unmatchedFiles = new List<string>();
+        HasConverted = false;
+        IsOverwriteInPlace = false;
+        SelectedFileItem = null;
         OnPropertyChanged(nameof(ScannedCountText));
         Summary = null;
         ReportSections.Clear();
@@ -670,7 +810,7 @@ public partial class MainViewModel : ObservableObject
             }
 
             StatusText = Res.VM_ApplyingUpdate;
-            _updateService.ApplyUpdateAndExit(zipPath);
+            _updateService.ApplyUpdateAndExit(zipPath, update.Sha256);
         }
         catch (UpdateException ex)
         {

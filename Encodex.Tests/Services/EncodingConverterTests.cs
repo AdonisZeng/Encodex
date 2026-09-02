@@ -281,6 +281,26 @@ public class EncodingConverterTests : IDisposable
         Assert.True(File.Exists(Path.Combine(_outputDir, "image.png")));
     }
 
+    // ---- C4: concurrent copying must not scramble the report order ----
+
+    [Fact]
+    public async Task CopyUnmatchedFilesAsync_PreservesInputOrder()
+    {
+        var files = new List<string>();
+        for (int i = 0; i < 24; i++)
+        {
+            var name = $"img{i:00}.png";
+            File.WriteAllBytes(Path.Combine(_sourceDir, name), new byte[] { (byte)i, 0x50 });
+            files.Add(Path.Combine(_sourceDir, name));
+        }
+
+        var result = await new EncodingConverter().CopyUnmatchedFilesAsync(_sourceDir, _outputDir, files);
+
+        Assert.Equal(24, result.Copied);
+        Assert.Equal(0, result.Failed);
+        Assert.Equal(files.Select(Path.GetFileName), result.CopiedFiles);
+    }
+
     [Fact]
     public async Task CopyUnmatchedFilesAsync_MissingSource_CountsFailureAndContinues()
     {
@@ -506,5 +526,133 @@ public class EncodingConverterTests : IDisposable
         var output = Path.Combine(_outputDir, "test.txt");
         Assert.True(File.Exists(output));
         Assert.Equal(lastWriteUtc, File.GetLastWriteTimeUtc(output));
+    }
+
+    // ---- B5: an in-place rewrite must not reset the file's timestamps ----
+
+    [Fact]
+    public async Task ConvertAsync_OverwriteInPlace_PreservesSourceTimestamps()
+    {
+        var gbk = Encoding.GetEncoding("GBK");
+        var filePath = Path.Combine(_sourceDir, "test.txt");
+        File.WriteAllBytes(filePath, gbk.GetBytes("你好世界"));
+        var lastWriteUtc = new DateTime(2020, 1, 2, 3, 4, 5, DateTimeKind.Utc);
+        File.SetLastWriteTimeUtc(filePath, lastWriteUtc);
+
+        var item = new FileConversionItem
+        {
+            RelativePath = "test.txt",
+            FileName = "test.txt",
+            FileSize = 12,
+            DetectedEncoding = "GBK",
+            TargetEncoding = "utf-8",
+            IsSelected = true
+        };
+
+        var summary = await new EncodingConverter().ConvertAsync(
+            new List<FileConversionItem> { item },
+            _sourceDir, _sourceDir, new UTF8Encoding(false), overwriteInPlace: true);
+
+        Assert.Equal(ConversionStatus.Success, item.Status);
+        // The source is gone by the time the rewrite finishes, so the timestamps
+        // must be captured before the rewrite, not read from the rewritten file.
+        Assert.Equal(lastWriteUtc, File.GetLastWriteTimeUtc(filePath));
+    }
+
+    // ---- B7: a binary file stays "skipped"; an untouched file is not "copied" ----
+
+    [Fact]
+    public async Task ConvertAsync_BinaryItemKeepsSkippedStatus()
+    {
+        var filePath = Path.Combine(_sourceDir, "data.bin");
+        var bytes = new byte[] { 0x00, 0x01, 0x02, 0x00, 0xFF };
+        File.WriteAllBytes(filePath, bytes);
+
+        var item = new FileConversionItem
+        {
+            RelativePath = "data.bin",
+            FileName = "data.bin",
+            FileSize = bytes.Length,
+            DetectedEncoding = null,          // binary: no encoding detected
+            TargetEncoding = "utf-8",
+            IsSelected = true,
+            Status = ConversionStatus.Skipped,
+            StatusMessage = "二进制文件"
+        };
+
+        var summary = await new EncodingConverter().ConvertAsync(
+            new List<FileConversionItem> { item },
+            _sourceDir, _outputDir, new UTF8Encoding(false));
+
+        Assert.Equal(ConversionStatus.Skipped, item.Status);
+        Assert.Equal("二进制文件", item.StatusMessage);
+        Assert.Equal(1, summary.Skipped);
+        Assert.Equal(0, summary.Copied);
+        Assert.Equal(bytes, File.ReadAllBytes(Path.Combine(_outputDir, "data.bin")));
+    }
+
+    // ---- B8: in-place backups must not copy files that can never be rewritten ----
+
+    [Fact]
+    public async Task ConvertAsync_OverwriteInPlace_SkippedItemNotBackedUp_ButStillCounted()
+    {
+        var gbk = Encoding.GetEncoding("GBK");
+        var textPath = Path.Combine(_sourceDir, "a.txt");
+        File.WriteAllBytes(textPath, gbk.GetBytes("你好世界"));
+
+        var binaryPath = Path.Combine(_sourceDir, "data.bin");
+        var binary = new byte[] { 0x00, 0x01, 0x02, 0xFF };
+        File.WriteAllBytes(binaryPath, binary);
+
+        var items = new List<FileConversionItem>
+        {
+            new()
+            {
+                RelativePath = "a.txt",
+                FileName = "a.txt",
+                FileSize = new FileInfo(textPath).Length,
+                DetectedEncoding = "GBK",
+                TargetEncoding = "utf-8",
+                IsSelected = true,
+                Status = ConversionStatus.Pending
+            },
+            new()
+            {
+                RelativePath = "data.bin",
+                FileName = "data.bin",
+                FileSize = binary.Length,
+                DetectedEncoding = null,   // binary: nothing to convert, never rewritten
+                TargetEncoding = "utf-8",
+                IsSelected = true,
+                Status = ConversionStatus.Skipped
+            }
+        };
+
+        var progress = new CollectingProgress();
+        var summary = await new EncodingConverter().ConvertAsync(
+            items, _sourceDir, _sourceDir, new UTF8Encoding(false),
+            progress, overwriteInPlace: true);
+
+        Assert.Equal(1, summary.Success);
+        Assert.Equal(1, summary.Skipped);
+
+        // Only the file actually rewritten in place needs a backup; the Skipped item's
+        // original bytes are untouched, so copying them would be wasted IO.
+        var backedUp = Directory.GetFiles(summary.BackupDirectory!, "*", SearchOption.AllDirectories)
+            .Select(Path.GetFileName).OrderBy(n => n).ToArray();
+        Assert.Equal(new[] { "a.txt" }, backedUp);
+
+        // The Skipped item still advances progress so the bar deterministically reaches Total.
+        Assert.Equal(2, progress.Updates.Max(u => u.Processed));
+        Assert.Equal(2, progress.Updates.Max(u => u.Total));
+    }
+
+    /// <summary>Synchronous IProgress collector: Progress&lt;T&gt; would marshal
+    /// asynchronously without a SynchronizationContext and race the assertions.</summary>
+    private sealed class CollectingProgress : IProgress<ConversionProgress>
+    {
+        public List<ConversionProgress> Updates { get; } = new();
+
+        public void Report(ConversionProgress value) => Updates.Add(value);
     }
 }

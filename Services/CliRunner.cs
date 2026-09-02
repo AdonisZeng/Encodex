@@ -16,11 +16,27 @@ public static class CliRunner
         // Script-friendly output: wrap the raw stdout stream in a UTF-8 writer.
         // (Console.OutputEncoding cannot be changed when output is redirected on
         // .NET Framework, and the default console code page mangles non-ASCII.)
+        // The internally created writer is disposed so the output stream is flushed
+        // and released; a caller-supplied writer stays owned by the caller.
+        var ownsWriter = output == null;
         var writer = output ?? new StreamWriter(Console.OpenStandardOutput(), new UTF8Encoding(false))
         {
             AutoFlush = true
         };
 
+        try
+        {
+            return RunCore(args, writer);
+        }
+        finally
+        {
+            if (ownsWriter)
+                writer.Dispose();
+        }
+    }
+
+    private static int RunCore(string[] args, TextWriter writer)
+    {
         string? sourceDir = null, targetName = null, outDir = null;
         var extensions = new List<string>();
         bool overwrite = false;
@@ -135,11 +151,11 @@ public static class CliRunner
             var name = Path.GetFileName(trimmed);
             if (string.IsNullOrEmpty(parent) || string.IsNullOrEmpty(name))
             {
-                targetDir = Path.Combine(sourceDir!, "Encodex_" + targetEncoding.WebName);
+                targetDir = Path.Combine(sourceDir!, "Encodex_" + EncodingConverter.GetEncodingFolderName(targetEncoding));
             }
             else
             {
-                targetDir = Path.Combine(parent, $"{name}_{targetEncoding.WebName}");
+                targetDir = Path.Combine(parent, $"{name}_{EncodingConverter.GetEncodingFolderName(targetEncoding)}");
             }
         }
 

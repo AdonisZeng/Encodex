@@ -22,6 +22,10 @@ public class AppUpdateService
 
     private const string UpdaterFileName = "Encodex.Updater.exe";
 
+    /// <summary>Backup extension the updater parks replaced originals under
+    /// (mirrors Encodex.Updater's <c>UpdaterBackupExtension</c>).</summary>
+    private const string UpdaterBackupExtension = ".upd-old";
+
     private static readonly HttpClient Http = CreateClient();
 
     private readonly string _manifestUrl;
@@ -98,6 +102,13 @@ public class AppUpdateService
     public async Task<string> DownloadAsync(UpdateInfo info, IProgress<DownloadProgress>? progress = null,
         CancellationToken cancellationToken = default)
     {
+        // Only the download URL is restricted: the manifest may legitimately point at
+        // a local server during development, but the package that becomes the running
+        // application must never travel in the clear.
+        if (!Uri.TryCreate(info.DownloadUrl, UriKind.Absolute, out var downloadUri) ||
+            !string.Equals(downloadUri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase))
+            throw new UpdateException(Res.Upd_InsecureUrl);
+
         var tempZip = Path.Combine(
             Path.GetTempPath(), $"Encodex-update-{info.Version}.zip");
         if (File.Exists(tempZip))
@@ -135,10 +146,13 @@ public class AppUpdateService
     }
 
     /// <summary>
-    /// Launches Encodex.Updater.exe with (currentPid, zipPath, installDirectory)
-    /// and shuts the app down so the updater can replace the files.
+    /// Launches Encodex.Updater.exe with (currentPid, zipPath, installDirectory, sha256)
+    /// and shuts the app down so the updater can replace the files. The hash travels
+    /// with the package so the updater re-verifies it: the temp file lives in a
+    /// user-writable directory and could otherwise be swapped between this check and
+    /// the update being applied.
     /// </summary>
-    public void ApplyUpdateAndExit(string zipPath)
+    public void ApplyUpdateAndExit(string zipPath, string? sha256 = null)
     {
         var installDirectory = AppContext.BaseDirectory;
         var updaterPath = Path.Combine(installDirectory, UpdaterFileName);
@@ -152,7 +166,8 @@ public class AppUpdateService
         {
             QuoteWindowsArgument(Process.GetCurrentProcess().Id.ToString()),
             QuoteWindowsArgument(zipPath),
-            QuoteWindowsArgument(installDirectory)
+            QuoteWindowsArgument(installDirectory),
+            QuoteWindowsArgument(sha256 ?? "")
         });
         _ = Process.Start(new ProcessStartInfo
         {
@@ -173,28 +188,41 @@ public class AppUpdateService
         }));
     }
 
+    /// <summary>Checks the running install directory for leftovers of a failed update.
+    /// Returns a user-presentable message, or null when there is no trace of failure.</summary>
+    public static string? DetectFailedUpdate() => DetectFailedUpdate(AppContext.BaseDirectory);
+
     /// <summary>
-    /// Checks for leftovers of a failed update attempt: an updater that died while
-    /// self-replacing leaves the extracted replacement next to the running exe.
-    /// Returns a user-presentable message, or null when there is no trace of failure.
+    /// Checks <paramref name="baseDirectory"/> for leftovers of a failed update attempt.
+    /// The current updater parks each replaced original as *.upd-old and deletes them on
+    /// success (rollback consumes them too), so their presence — even nested — means an
+    /// updater crashed mid-replacement. The legacy <c>Encodex.Updater.exe.new</c> marker
+    /// from older updater versions is still honored so those machines get the notice once.
     /// </summary>
-    public static string? DetectFailedUpdate()
+    internal static string? DetectFailedUpdate(string baseDirectory)
     {
         try
         {
-            var leftover = Path.Combine(AppContext.BaseDirectory, UpdaterFileName + ".new");
-            if (File.Exists(leftover))
-            {
+            // Enumerate first so the decision and the cleanup read the same state; both
+            // leftover kinds are deleted so the notice is shown exactly once.
+            var leftovers = Directory.GetFiles(
+                baseDirectory, "*" + UpdaterBackupExtension, SearchOption.AllDirectories);
+            var legacy = Path.Combine(baseDirectory, UpdaterFileName + ".new");
+            if (leftovers.Length == 0 && !File.Exists(legacy))
+                return null;
+
+            foreach (var leftover in leftovers)
                 File.Delete(leftover);
-                return Res.Upd_FailedUpdateLeftover;
-            }
+            if (File.Exists(legacy))
+                File.Delete(legacy);
+
+            return Res.Upd_FailedUpdateLeftover;
         }
         catch
         {
             // Diagnostics only — must never break startup.
+            return null;
         }
-
-        return null;
     }
 
     private static string? ReadElement(XElement? root, string name) =>

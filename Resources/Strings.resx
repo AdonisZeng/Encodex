@@ -54,10 +54,14 @@
   <data name="VM_ConvertDone" xml:space="preserve"><value>转换完成: 成功 {0}, 跳过 {1}, 失败 {2}, 复制 {3}</value></data>
   <data name="VM_ConvertCancelled" xml:space="preserve"><value>转换已取消</value></data>
   <data name="VM_Selected" xml:space="preserve"><value>已选择: {0}</value></data>
-  <data name="VM_InvalidExtension" xml:space="preserve"><value>扩展名 "{0}" 无效或已存在。</value></data>
+  <data name="VM_InvalidExtension" xml:space="preserve"><value>扩展名 "{0}" 无效。</value></data>
+  <data name="VM_DuplicateExtension" xml:space="preserve"><value>扩展名 "{0}" 已在列表中。</value></data>
   <data name="VM_AddExtensionTitle" xml:space="preserve"><value>添加扩展名</value></data>
   <data name="VM_Binary" xml:space="preserve"><value>二进制文件</value></data>
   <data name="VM_BackupDir" xml:space="preserve"><value>备份目录（可从该目录恢复原文件）: {0}</value></data>
+  <data name="Ui_DeleteBackup" xml:space="preserve"><value>删除备份</value></data>
+  <data name="VM_BackupDeleted" xml:space="preserve"><value>备份已删除: {0}</value></data>
+  <data name="VM_BackupDeleteFailed" xml:space="preserve"><value>删除备份失败: {0}</value></data>
   <data name="VM_SuccessSection" xml:space="preserve"><value>成功转换</value></data>
   <data name="VM_SkippedSection" xml:space="preserve"><value>跳过</value></data>
   <data name="VM_FailedSection" xml:space="preserve"><value>失败</value></data>
@@ -82,6 +86,7 @@
   <data name="VM_ApplyingUpdate" xml:space="preserve"><value>正在应用更新...</value></data>
   <data name="VM_UpdateFailed" xml:space="preserve"><value>检查更新失败: {0}</value></data>
   <data name="VM_ConvertFailed" xml:space="preserve"><value>转换失败: {0}</value></data>
+  <data name="VM_RefreshFailed" xml:space="preserve"><value>转换完成，但无法重新检测已覆盖文件的编码；「执行转换」已锁定，请重新扫描后再试。</value></data>
   <data name="VM_FolderDialogDescription" xml:space="preserve"><value>选择项目文件夹</value></data>
   <data name="VM_CustomGroup" xml:space="preserve"><value>自定义</value></data>
   <data name="VM_MandatoryUpdate" xml:space="preserve"><value>发现强制更新版本（当前 v{1} → 最新 v{0}）。
@@ -100,6 +105,8 @@
   <data name="Upd_ChecksumFailed" xml:space="preserve"><value>更新包校验失败（SHA-256 不一致），文件可能已损坏，请重试。</value></data>
   <data name="Upd_MissingUpdater" xml:space="preserve"><value>未找到 {0}，无法执行更新。</value></data>
   <data name="Upd_LaunchFailed" xml:space="preserve"><value>无法启动 {0}。</value></data>
+  <data name="Upd_InsecureUrl" xml:space="preserve"><value>更新包下载地址未使用 HTTPS，为避免内容被篡改已拒绝下载。</value></data>
+  <data name="Upd_AlreadyRunning" xml:space="preserve"><value>Encodex 已经在运行。</value></data>
   <data name="Upd_FailedUpdateLeftover" xml:space="preserve"><value>上一次自动更新未能完成安装（更新器在替换文件时中断），当前可能仍是旧版本。
 请再次点击 🔄 检查更新重试，或从 GitHub Releases 手动下载最新版本。</value></data>
   <data name="Upd_DialogTitle" xml:space="preserve"><value>Encodex 更新</value></data>

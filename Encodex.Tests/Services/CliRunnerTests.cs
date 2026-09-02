@@ -73,6 +73,25 @@ public class CliRunnerTests : IDisposable
             Path.Combine(_tempDir, "src_utf-8", "a.txt"), new UTF8Encoding(false)));
     }
 
+    // ---- B8: the CLI output folder must distinguish BOM variants like the GUI ----
+
+    [Fact]
+    public void Run_Utf8WithBom_OutputFolderDistinguishesBomVariant()
+    {
+        var srcDir = Path.Combine(_tempDir, "src3");
+        Directory.CreateDirectory(srcDir);
+        File.WriteAllText(Path.Combine(srcDir, "a.txt"), "hello");
+
+        var output = new StringWriter();
+        var exitCode = CliRunner.Run(
+            new[] { "--src", srcDir, "--target", "utf-8-bom", "--ext", ".txt" }, output);
+
+        Assert.Equal(0, exitCode);
+        // WebName is "utf-8" for both BOM variants; the folder must still differ.
+        Assert.True(Directory.Exists(Path.Combine(_tempDir, "src3_utf-8-bom")));
+        Assert.False(Directory.Exists(Path.Combine(_tempDir, "src3_utf-8")));
+    }
+
     [Fact]
     public void Run_OverwriteMode_RewritesSourceAndReportsBackup()
     {

@@ -14,7 +14,7 @@ public class FileScanner
 {
     // Build artifacts and VCS folders are never interesting as conversion targets and
     // can easily dominate a scan (e.g. bin/obj inside a .NET project).
-    private static readonly string[] SkippedDirectories =
+    private static readonly HashSet<string> SkippedDirectories = new(StringComparer.OrdinalIgnoreCase)
     {
         "bin", "obj", ".git", ".vs", ".svn", ".hg", "node_modules", "packages",
         ".idea", ".vscode", "dist", "build", "out", "publish"
@@ -101,7 +101,7 @@ public class FileScanner
         }
     }
 
-    // .NET Framework has no EnumerationOptions: the recursion below filters these
+    // .NET Framework has no EnumerationOptions: the walk below filters these
     // attributes itself. Reparse points are skipped to avoid infinite loops through
     // symlinks/junctions; hidden and system entries are never interesting.
     private const FileAttributes SkippedAttributes =
@@ -109,36 +109,45 @@ public class FileScanner
 
     private static IEnumerable<string> EnumerateFilesRecursive(string directory)
     {
-        // Enumeration is lazy: exceptions (access denied, path too long, ...) surface
-        // while iterating, so materialize inside the try. Unreadable directories must
-        // not abort the whole scan; PathTooLongException/IOException need the catch.
-        List<FileSystemInfo> entries;
-        try
-        {
-            entries = new DirectoryInfo(directory).EnumerateFileSystemInfos().ToList();
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        {
-            yield break;
-        }
+        // Explicit stack instead of a recursive iterator: a deeply nested tree no
+        // longer builds a chain of nested state machines, so each file is yielded at
+        // O(1) stack depth instead of one frame per ancestor directory.
+        var pending = new Stack<string>();
+        pending.Push(directory);
 
-        var subDirs = new List<DirectoryInfo>();
-        foreach (var entry in entries)
+        while (pending.Count > 0)
         {
-            if ((entry.Attributes & SkippedAttributes) != 0)
-                continue;
-            if (entry is FileInfo file)
-                yield return file.FullName;
-            else if (entry is DirectoryInfo subDir)
-                subDirs.Add(subDir);
-        }
+            var current = pending.Pop();
 
-        foreach (var subDir in subDirs)
-        {
-            if (SkippedDirectories.Contains(subDir.Name, StringComparer.OrdinalIgnoreCase))
+            // Enumeration is lazy: exceptions (access denied, path too long, ...)
+            // surface while iterating, so materialize inside the try. Unreadable
+            // directories must not abort the whole scan.
+            List<FileSystemInfo> entries;
+            try
+            {
+                entries = new DirectoryInfo(current).EnumerateFileSystemInfos().ToList();
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
                 continue;
-            foreach (var file in EnumerateFilesRecursive(subDir.FullName))
-                yield return file;
+            }
+
+            var subDirectories = new List<string>();
+            foreach (var entry in entries)
+            {
+                if ((entry.Attributes & SkippedAttributes) != 0)
+                    continue;
+
+                if (entry is FileInfo file)
+                    yield return file.FullName;
+                else if (entry is DirectoryInfo subDir && !SkippedDirectories.Contains(subDir.Name))
+                    subDirectories.Add(subDir.FullName);
+            }
+
+            // Pushed in reverse so the first subdirectory is processed next,
+            // matching the depth-first order of the previous recursive walk.
+            for (int i = subDirectories.Count - 1; i >= 0; i--)
+                pending.Push(subDirectories[i]);
         }
     }
 }

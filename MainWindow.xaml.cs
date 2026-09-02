@@ -14,6 +14,11 @@ namespace Encodex
             InitializeComponent();
             DataContext = new MainViewModel();
 
+            // Flush the configuration on close: a user who picked a folder, changed the
+            // target encoding or toggled extensions and quit must find those choices
+            // restored on the next launch. (Previously settings were only saved on scan.)
+            Closing += (_, _) => (DataContext as MainViewModel)?.SaveSettings();
+
             // Surface a failed previous update (updater died mid-replacement) once,
             // after the window is visible, so the user knows why the version is stale.
             var failedUpdate = AppUpdateService.DetectFailedUpdate();

@@ -132,4 +132,52 @@ public class FileScannerTests : IDisposable
         Assert.Single(unmatched);
         Assert.EndsWith("logo.png", unmatched[0]);
     }
+
+    // ---- C6: the explicit-stack walk must survive deep nesting ----
+
+    [Fact]
+    public void Scan_HandlesDeeplyNestedDirectories()
+    {
+        var dir = _tempDir;
+        for (int level = 0; level < 40; level++)
+        {
+            dir = Path.Combine(dir, $"level{level:00}");
+            Directory.CreateDirectory(dir);
+        }
+        File.WriteAllText(Path.Combine(dir, "Deep.cs"), "code");
+
+        var scanner = new FileScanner();
+        var results = scanner.Scan(_tempDir, new ExtensionProfile());
+
+        Assert.Single(results);
+        Assert.Equal("Deep.cs", results[0].FileName);
+    }
+
+    [Fact]
+    public void Scan_DoesNotSkipRootWhenRootIsNamedLikeBuildFolder()
+    {
+        // The skip list applies to subdirectories only: a user who deliberately
+        // points the tool at a "bin" folder still gets its files.
+        var root = Path.Combine(_tempDir, "bin");
+        Directory.CreateDirectory(root);
+        File.WriteAllText(Path.Combine(root, "Inside.cs"), "code");
+
+        var scanner = new FileScanner();
+        var results = scanner.Scan(root, new ExtensionProfile());
+
+        Assert.Single(results);
+        Assert.Equal("Inside.cs", results[0].FileName);
+    }
+
+    [Fact]
+    public void Scan_SkipsDirectoryNamesCaseInsensitively()
+    {
+        Directory.CreateDirectory(Path.Combine(_tempDir, "OBJ"));
+        File.WriteAllText(Path.Combine(_tempDir, "OBJ", "Tmp.cs"), "code");
+
+        var scanner = new FileScanner();
+        var results = scanner.Scan(_tempDir, new ExtensionProfile());
+
+        Assert.Empty(results);
+    }
 }

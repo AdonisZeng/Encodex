@@ -53,6 +53,7 @@ public static class Res
     public static string Ui_Ok => Get("Ui_Ok");
     public static string Ui_Cancel => Get("Ui_Cancel");
     public static string Ui_CancelUpdate => Get("Ui_CancelUpdate");
+    public static string Ui_DeleteBackup => Get("Ui_DeleteBackup");
 
     // --- MainViewModel ---
     public static string VM_SelectFolder => Get("VM_SelectFolder");
@@ -92,6 +93,10 @@ public static class Res
     public static string VM_FolderDialogDescription => Get("VM_FolderDialogDescription");
     public static string VM_CustomGroup => Get("VM_CustomGroup");
     public static string VM_MandatoryUpdate => Get("VM_MandatoryUpdate");
+    public static string VM_RefreshFailed => Get("VM_RefreshFailed");
+    public static string VM_DuplicateExtension => Get("VM_DuplicateExtension");
+    public static string VM_BackupDeleted => Get("VM_BackupDeleted");
+    public static string VM_BackupDeleteFailed => Get("VM_BackupDeleteFailed");
 
     // --- EncodingConverter status messages ---
     public static string Conv_UnknownCopy => Get("Conv_UnknownCopy");
@@ -111,6 +116,8 @@ public static class Res
     public static string Upd_LaunchFailed => Get("Upd_LaunchFailed");
     public static string Upd_FailedUpdateLeftover => Get("Upd_FailedUpdateLeftover");
     public static string Upd_DialogTitle => Get("Upd_DialogTitle");
+    public static string Upd_InsecureUrl => Get("Upd_InsecureUrl");
+    public static string Upd_AlreadyRunning => Get("Upd_AlreadyRunning");
 
     // --- PreviewWindow ---
     public static string Prev_Title => Get("Prev_Title");
