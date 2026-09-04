@@ -253,4 +253,99 @@ public class EncodingDetectorTests : IDisposable
 
         Assert.Equal("utf-32LE", result.EncodingName);
     }
+
+    [Fact]
+    public void Detect_EmptyByteArray_ReturnsNullEncoding()
+    {
+        var result = new EncodingDetector().Detect(Array.Empty<byte>());
+
+        Assert.Null(result.Encoding);
+        Assert.Null(result.EncodingName);
+        Assert.False(result.IsBinary);
+    }
+
+    [Fact]
+    public void Detect_PureAscii_IsNotFlaggedAsBinary()
+    {
+        // Ude may return no charset for pure ASCII (which the converter then copies
+        // as-is — harmless), but it must never be misclassified as binary.
+        var bytes = Encoding.ASCII.GetBytes("just plain ascii text, nothing exotic here.");
+
+        var result = new EncodingDetector().Detect(bytes);
+
+        Assert.False(result.IsBinary);
+    }
+
+    [Fact]
+    public void Detect_ShiftJisLongText_ReturnsAnEncoding()
+    {
+        // Ude is unreliable on a few short bytes (see CLAUDE.md): use a long sample.
+        var shiftJis = Encoding.GetEncoding("shift_jis");
+        var text = "これはエンコーディング検出器が Shift-JIS エンコーディングを確実に認識できるようにするための、十分に長い日本語のテストテキストです。東京都は日本の首都であり、歴史と文化の中心地です。";
+        var path = WriteFile(shiftJis.GetBytes(text));
+
+        var result = new EncodingDetector().Detect(path);
+
+        Assert.False(result.IsBinary);
+        Assert.NotNull(result.Encoding);
+    }
+
+    [Fact]
+    public void Detect_Big5LongText_ReturnsAnEncoding()
+    {
+        var big5 = Encoding.GetEncoding("big5");
+        var text = "這是一段足夠長的繁體中文測試文本，用於讓編碼檢測器能夠可靠地識別出 Big5 編碼。中華民國台灣是一座美麗的島嶼，台北是其中心城市。";
+        var path = WriteFile(big5.GetBytes(text));
+
+        var result = new EncodingDetector().Detect(path);
+
+        Assert.False(result.IsBinary);
+        Assert.NotNull(result.Encoding);
+    }
+
+    [Fact]
+    public void Detect_LargeFile_DetectsFromHeadBytes()
+    {
+        // Detection reads at most the first 64KB; a BOM at the head of a much
+        // larger file must still be found.
+        var head = new UTF8Encoding(true).GetPreamble();
+        var body = new byte[256 * 1024];
+        for (int i = 0; i < body.Length; i++)
+            body[i] = (byte)'A';
+        var path = WriteFile(head.Concat(body).ToArray());
+
+        var result = new EncodingDetector().Detect(path);
+
+        Assert.Equal(EncodingDetector.Utf8BomName, result.EncodingName);
+    }
+
+    [Fact]
+    public void Detect_FileVanishingDuringRead_ThrowsIOException()
+    {
+        // The callers (scan pipeline / CLI) rely on a detectable failure mode so
+        // they can degrade the file to "unknown" instead of crashing.
+        var missing = Path.Combine(_tempDir, "no-such-file.txt");
+
+        Assert.ThrowsAny<IOException>(() => new EncodingDetector().Detect(missing));
+    }
+
+    [Theory]
+    [InlineData("utf-16LE")]
+    [InlineData("utf-16BE")]
+    [InlineData("utf-32LE")]
+    [InlineData("utf-32BE")]
+    [InlineData("GBK")]
+    [InlineData("GB2312")]
+    [InlineData("GB18030")]
+    [InlineData("Big5")]
+    [InlineData("shift_jis")]
+    [InlineData("euc-kr")]
+    [InlineData("us-ascii")]
+    [InlineData("iso-8859-1")]
+    public void ResolveName_SymmetricAndCodePageNames_AllResolve(string name)
+    {
+        // Every name the detector can emit (and every candidate the file list
+        // offers for manual correction) must round-trip through GetEncoding.
+        Assert.NotNull(EncodingDetector.ResolveName(name));
+    }
 }

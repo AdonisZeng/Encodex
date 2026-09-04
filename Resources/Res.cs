@@ -104,6 +104,8 @@ public static class Res
     public static string Conv_DecodeFailed => Get("Conv_DecodeFailed");
     public static string Conv_EncodeFailed => Get("Conv_EncodeFailed");
     public static string Conv_BackupFailed => Get("Conv_BackupFailed");
+    public static string Conv_ReplaceFailed => Get("Conv_ReplaceFailed");
+    public static string Conv_TempKept => Get("Conv_TempKept");
 
     // --- AppUpdateService ---
     public static string Upd_NetworkError => Get("Upd_NetworkError");

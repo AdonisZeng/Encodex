@@ -12,7 +12,7 @@
 - **WPF + WPF-UI（Fluent 风格）** 界面，MVVM 模式（CommunityToolkit.Mvvm）
 - 核心依赖均为 NuGet `PackageReference`，版本号使用通配符（`8.*` / `4.*` 等）：
   `CommunityToolkit.Mvvm`、`System.Text.Json`、`System.Text.Encoding.CodePages`、`Ude.NetStandard`、`WPF-UI`
-- 测试框架：xUnit（`Encodex.Tests`）
+- 测试框架：xUnit（测试项目位于 `Test/`，程序集名仍为 `Encodex.Tests`）
 - 无 CI/CD，本地 Visual Studio / `dotnet` CLI 构建
 
 ### 解决方案结构
@@ -34,7 +34,8 @@ Encodex.slnx
 │   └── AssemblyInfo.cs       程序集元数据；版本号唯一来源（见第 3 节）
 ├── Encodex.Updater/          独立更新器（net481，被主程序 ProjectReference 编译进输出目录）
 │   └── AssemblyInfo.cs       InternalsVisibleTo("Encodex.Tests")
-└── Encodex.Tests/            xUnit 测试，经 ProjectReference 引用主项目（传递引用含 Updater）
+└── Test/                     xUnit 测试，经 ProjectReference 引用主项目（传递引用含 Updater）
+                              （目录名 Test，程序集名保持 Encodex.Tests：InternalsVisibleTo 依赖它）
 ```
 
 ### 关键约定
@@ -47,13 +48,18 @@ Encodex.slnx
 - **所有用户可见文案**必须放在 `Resources/Strings.resx`，经 `Res` 静态类访问（XAML 用 `{x:Static r:Res.XXX}`，
   xmlns:r="clr-namespace:Encodex.Resources"）；默认中文，新增语言只需添加语言变体 .resx。
   例外：`Encodex.Updater` 是独立程序集，无法引用 `Res`，其弹窗文案保持硬编码中文。
-- 主项目通过 `Compile Remove` 排除 `Encodex.Tests/**` 与 `Encodex.Updater/**`；Updater 通过 `ProjectReference` 编译进主程序输出目录。
+- 主项目通过 `Compile Remove` 排除 `Test/**` 与 `Encodex.Updater/**`；Updater 通过 `ProjectReference` 编译进主程序输出目录。
 - `EncodingConverter.ConvertAsync` 并发转换（SemaphoreSlim 上限 8，常量 `EncodingConverter.MaxConcurrency`，
   扫描检测、备份、未匹配文件复制复用同一上限），各文件相互独立；原地覆盖模式（`overwriteInPlace`）
   先并发全量备份到 `%TEMP%\Encodex-backup-<时间戳>` 再写回，备份目录随报告展示，报告页提供「删除备份」
   入口（`MainViewModel.DeleteBackup`，该目录不会被自动清理）。
 - 转换/复制后保留源文件时间戳；原地模式因源文件已被替换，时间戳在改写前捕获（`TryCaptureTimestamps` /
-  `ApplyTimestamps`）；覆盖替换走 `File.Replace`（`ReplaceFile`，原子），失败不会把原文件置于“已删除”中间态。
+  `ApplyTimestamps`）；覆盖替换走 `TryReplaceFile`（internal，可单测）：**必须传入备份名**——`File.Replace`
+  的 `ERROR_UNABLE_TO_MOVE_REPLACEMENT`(1176) 在备份名为 null 时会把目标摘除且不可恢复，传了备份名才可
+  从 `*.encx-bak` 回滚。临时文件与备份文件都由 `MakeScratchPath` 生成（目标同目录 + 随机后缀：同卷是
+  `File.Replace` 的前提，随机后缀避免覆盖项目中真实的 `*.tmp` 并满足"备份文件不能已存在"）。`ConvertOneAsync`
+  用 `keepTemp` 标志控制清理：仅当替换失败且目标确认丢失时保留临时文件并提示路径（`Res.Conv_TempKept`），
+  已回滚则报 `Res.Conv_ReplaceFailed`；其余路径（取消、解码失败等）照常清理。
 - **重复转换安全**：原地转换成功后自动重新检测被改写文件的编码（`MainViewModel.RefreshDetectedEncodingsAsync`，
   仅 `overwriteInPlace`、仅 `Success` 项、后台线程执行）；刷新失败则置 `HasConverted` 锁定「执行转换」
   （`CanConvert`）直至重新扫描。`Reset` 会清空 `_unmatchedFiles` / `HasConverted` / `IsOverwriteInPlace` / `SelectedFileItem`。
@@ -124,7 +130,7 @@ Encodex.slnx
 
 ```powershell
 dotnet build Encodex.slnx -c Release          # 构建
-dotnet test Encodex.Tests\Encodex.Tests.csproj -c Release   # 运行测试
+dotnet test Test\Encodex.Tests.csproj -c Release   # 运行测试
 .\pack-release.ps1 -RepoOwner <用户名> -Notes "<更新日志>"    # 打包发布
 # CLI 无头转换（脚本/CI 集成；stdout 为 UTF-8，退出码 0=成功 1=有失败 2=参数错误）
 .\bin\Release\net481\Encodex.exe --cli --src <文件夹> --target utf-8 [--out <目录> | --overwrite] [--ext .cs,.js]

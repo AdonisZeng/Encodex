@@ -494,6 +494,230 @@ public class MainViewModelTests : IDisposable
         await WaitForProgressAsync(() => vm.ProgressValue, vm.ProgressMaximum);
     }
 
+    // ---- 命令可用性（CanExecute）逻辑 ----
+
+    [Fact]
+    public void CanScan_RequiresFolderPathAndIdle()
+    {
+        var vm = CreateViewModel();
+
+        Assert.False(vm.CanScan);
+
+        vm.SourceFolderPath = _tempDir;
+        Assert.True(vm.CanScan);
+
+        vm.IsScanning = true;
+        Assert.False(vm.CanScan);
+        vm.IsScanning = false;
+
+        vm.IsConverting = true;
+        Assert.False(vm.CanScan);
+    }
+
+    [Fact]
+    public void CanConvert_RequiresItemsAndNotLocked()
+    {
+        var vm = CreateViewModel();
+
+        Assert.False(vm.CanConvert);
+
+        vm.FileItems.Add(new FileConversionItem());
+        Assert.True(vm.CanConvert);
+
+        vm.HasConverted = true;
+        Assert.False(vm.CanConvert);
+        vm.HasConverted = false;
+
+        vm.IsConverting = true;
+        Assert.False(vm.CanConvert);
+    }
+
+    [Fact]
+    public void CanCancel_OnlyWhileConverting()
+    {
+        var vm = CreateViewModel();
+
+        Assert.False(vm.CanCancel);
+
+        vm.IsConverting = true;
+        Assert.True(vm.CanCancel);
+    }
+
+    [Fact]
+    public void BackupDirectoryText_ReflectsSummaryBackup()
+    {
+        var vm = CreateViewModel();
+
+        Assert.Null(vm.BackupDirectoryText);
+
+        vm.Summary = new ConversionSummary { Success = 1, BackupDirectory = @"C:\temp\backup" };
+        Assert.NotNull(vm.BackupDirectoryText);
+        Assert.Contains(@"C:\temp\backup", vm.BackupDirectoryText);
+    }
+
+    // ---- 扫描/转换流程的更多边界 ----
+
+    [Fact]
+    public async Task ScanAsync_NonexistentFolder_KeepsListEmpty()
+    {
+        var vm = CreateViewModel();
+        vm.SourceFolderPath = Path.Combine(_tempDir, "no-such-folder");
+
+        await vm.ScanCommand.ExecuteAsync(null);
+
+        Assert.Empty(vm.FileItems);
+    }
+
+    [Fact]
+    public async Task ScanAsync_UnreadableFile_StaysInListWithUnknownEncoding()
+    {
+        // Regression: one unreadable file used to abort the whole scan; it must be
+        // degraded to "unknown" (copied as-is later) without affecting the rest.
+        var dir = Path.Combine(_tempDir, "src-unreadable");
+        Directory.CreateDirectory(dir);
+        var locked = Path.Combine(dir, "secret.txt");
+        File.WriteAllText(locked, "content that cannot be read back");
+        File.WriteAllText(Path.Combine(dir, "normal.txt"), "perfectly readable");
+        DenyRead(locked);
+
+        try
+        {
+            var vm = CreateViewModel();
+            vm.SourceFolderPath = dir;
+            await vm.ScanCommand.ExecuteAsync(null);
+
+            Assert.Equal(2, vm.FileItems.Count);
+            var lockedItem = vm.FileItems.First(i => i.FileName == "secret.txt");
+            Assert.Null(lockedItem.DetectedEncoding);
+            Assert.Equal(ConversionStatus.Pending, lockedItem.Status);
+        }
+        finally
+        {
+            AllowRead(locked);
+        }
+    }
+
+    [Fact]
+    public async Task ConvertAsync_SkipsUncheckedItems()
+    {
+        var dir = Path.Combine(_tempDir, "src-unchecked");
+        Directory.CreateDirectory(dir);
+        File.WriteAllText(Path.Combine(dir, "keep.txt"), "convert me");
+        File.WriteAllText(Path.Combine(dir, "skip.txt"), "leave me alone");
+
+        var vm = CreateViewModel();
+        vm.SourceFolderPath = dir;
+        await vm.ScanCommand.ExecuteAsync(null);
+        vm.FileItems.First(i => i.FileName == "skip.txt").IsSelected = false;
+
+        await vm.ConvertCommand.ExecuteAsync(null);
+
+        var outputDir = vm.Summary!.OutputPath;
+        Assert.True(File.Exists(Path.Combine(outputDir, "keep.txt")));
+        Assert.False(File.Exists(Path.Combine(outputDir, "skip.txt")));
+        // The unchecked item was never touched by the conversion pass.
+        Assert.Equal(ConversionStatus.Pending,
+            vm.FileItems.First(i => i.FileName == "skip.txt").Status);
+    }
+
+    [Fact]
+    public async Task ConvertAsync_CopiesUnmatchedFilesIntoOutputTree()
+    {
+        var dir = Path.Combine(_tempDir, "src-unmatched");
+        Directory.CreateDirectory(dir);
+        File.WriteAllText(Path.Combine(dir, "a.txt"), "hello");
+        File.WriteAllBytes(Path.Combine(dir, "img.png"), new byte[] { 0x89, 0x50 });
+
+        var vm = CreateViewModel();
+        vm.SourceFolderPath = dir;
+        await vm.ScanCommand.ExecuteAsync(null);
+        await vm.ConvertCommand.ExecuteAsync(null);
+
+        Assert.True(File.Exists(Path.Combine(vm.Summary!.OutputPath, "img.png")));
+    }
+
+    [Fact]
+    public async Task ScannedCountText_ReflectsItemCount()
+    {
+        var dir = Path.Combine(_tempDir, "src-count");
+        Directory.CreateDirectory(dir);
+        File.WriteAllText(Path.Combine(dir, "a.txt"), "one");
+        File.WriteAllText(Path.Combine(dir, "b.txt"), "two");
+
+        var vm = CreateViewModel();
+        vm.SourceFolderPath = dir;
+        await vm.ScanCommand.ExecuteAsync(null);
+
+        Assert.Equal(string.Format(Encodex.Resources.Res.Ui_ScannedCount, 2), vm.ScannedCountText);
+    }
+
+    // ---- 编码候选名与解析器的同步 ----
+
+    [Fact]
+    public void AvailableDetectedEncodings_AllResolveThroughDetector()
+    {
+        // The DataGrid offers these names for manual correction; every one must be
+        // convertible back into an Encoding or a corrected file would fail to convert.
+        var vm = CreateViewModel();
+
+        Assert.All(vm.AvailableDetectedEncodings,
+            name => Assert.NotNull(EncodingDetector.ResolveName(name)));
+    }
+
+    // ---- 设置恢复的更多分支 ----
+
+    [Fact]
+    public void Constructor_RestoresCustomExtensionsIntoCustomGroup()
+    {
+        var settingsPath = Path.Combine(_tempDir, "settings-custom.json");
+        Directory.CreateDirectory(_tempDir);
+        File.WriteAllText(settingsPath,
+            """{"CustomExtensions":[".log",".cfg"],"SelectedExtensions":[".log"]}""");
+
+        var vm = new MainViewModel(new AppSettingsStore(settingsPath));
+
+        // .cfg is a default extension and must not be duplicated; .log lands in
+        // the custom group with its saved check state applied.
+        Assert.Equal(1, vm.ExtensionOptions.Count(o => o.Extension == ".cfg"));
+        var customGroup = vm.ExtensionGroups.Last();
+        Assert.Single(customGroup.Extensions);
+        Assert.Equal(".log", customGroup.Extensions[0].Extension);
+        Assert.True(customGroup.Extensions[0].IsSelected);
+    }
+
+    [Fact]
+    public void ToggleTheme_PersistsThemeChoice()
+    {
+        var settingsPath = Path.Combine(_tempDir, "settings-theme.json");
+        var vm = new MainViewModel(new AppSettingsStore(settingsPath));
+        var initial = vm.IsLightTheme;
+
+        vm.ToggleThemeCommand.Execute(null);
+
+        var reloaded = new MainViewModel(new AppSettingsStore(settingsPath));
+        Assert.Equal(!initial, reloaded.IsLightTheme);
+    }
+
+    private static void DenyRead(string path)
+    {
+        var security = File.GetAccessControl(path);
+        security.AddAccessRule(new System.Security.AccessControl.FileSystemAccessRule(
+            System.Security.Principal.WindowsIdentity.GetCurrent().Name,
+            System.Security.AccessControl.FileSystemRights.Read,
+            System.Security.AccessControl.AccessControlType.Deny));
+        File.SetAccessControl(path, security);
+    }
+
+    private static void AllowRead(string path)
+    {
+        var security = File.GetAccessControl(path);
+        security.RemoveAccessRule(new System.Security.AccessControl.FileSystemAccessRule(
+            System.Security.Principal.WindowsIdentity.GetCurrent().Name,
+            System.Security.AccessControl.FileSystemRights.Read,
+            System.Security.AccessControl.AccessControlType.Deny));
+        File.SetAccessControl(path, security);
+    }
+
     /// <summary>Progress&lt;T&gt; posts callbacks asynchronously when no SynchronizationContext
     /// is captured (as under xUnit), so the terminal value can land just after the command
     /// completes. Wait for it; without the terminal correction the value never arrives.</summary>

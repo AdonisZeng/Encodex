@@ -258,7 +258,7 @@ public partial class MainViewModel : ObservableObject
                 Parallel.For(0, m.Count, new ParallelOptions
                 {
                     MaxDegreeOfParallelism = Math.Min(Environment.ProcessorCount, EncodingConverter.MaxConcurrency)
-                }, i => detected[i] = (m[i], _detector.Detect(m[i].FullPath)));
+                }, i => detected[i] = (m[i], DetectSafely(m[i].FullPath)));
 
                 // Detected in parallel, assembled in scan order so the list keeps the
                 // order the user saw before this change.
@@ -295,6 +295,21 @@ public partial class MainViewModel : ObservableObject
         finally
         {
             IsScanning = false;
+        }
+    }
+
+    /// <summary>Detects one file, degrading a file that vanished or turned unreadable
+    /// between the scan and this read to "unknown" (it is then copied as-is during
+    /// conversion) instead of aborting the whole scan for that one file.</summary>
+    private DetectionResult DetectSafely(string fullPath)
+    {
+        try
+        {
+            return _detector.Detect(fullPath);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return new DetectionResult();
         }
     }
 

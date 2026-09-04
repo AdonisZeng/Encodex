@@ -130,4 +130,60 @@ public class ExtensionProfileTests
         Assert.True(ExtensionProfile.TryNormalize(".c", out var normalized));
         Assert.Equal(".c", normalized);
     }
+
+    [Fact]
+    public void EmptyProfile_MatchesNothing_AndAcceptsAdditions()
+    {
+        // The snapshot profile used by scans starts empty and only takes the
+        // extensions the user actually checked.
+        var profile = new ExtensionProfile(loadDefaults: false);
+
+        Assert.Empty(profile.Extensions);
+        Assert.False(profile.Matches("Program.cs"));
+
+        Assert.True(profile.AddExtension(".cs"));
+        Assert.True(profile.Matches("Program.cs"));
+    }
+
+    [Fact]
+    public void RemoveExtension_NotPresent_ReturnsFalse()
+    {
+        var profile = new ExtensionProfile();
+
+        Assert.False(profile.RemoveExtension(".does-not-exist"));
+    }
+
+    [Fact]
+    public void Matches_ExtensionlessFile_ReturnsFalse()
+    {
+        var profile = new ExtensionProfile();
+
+        Assert.False(profile.Matches("Makefile"));
+        Assert.False(profile.Matches("noextension"));
+    }
+
+    [Fact]
+    public void GetDefaultGroups_ExtensionsAreUniqueAndComplete()
+    {
+        // A duplicated default would make AddExtension reject the second copy and
+        // desync the grouped view from the flat extension list.
+        var groups = ExtensionProfile.GetDefaultGroups();
+        var all = groups.SelectMany(g => g.Extensions).ToList();
+
+        Assert.Equal(all.Count, all.Distinct().Count());
+        Assert.Equal(all.Count, ExtensionProfile.GetDefaultExtensions().Length);
+        Assert.All(groups, g => Assert.NotEmpty(g.Extensions));
+    }
+
+    [Fact]
+    public void AddExtension_OutParameter_ReportsNormalizedForm()
+    {
+        var profile = new ExtensionProfile(loadDefaults: false);
+
+        Assert.True(profile.AddExtension("LOG", out var normalized));
+        Assert.Equal(".log", normalized);
+
+        Assert.False(profile.AddExtension("c++", out var rejected));
+        Assert.Equal("", rejected);
+    }
 }

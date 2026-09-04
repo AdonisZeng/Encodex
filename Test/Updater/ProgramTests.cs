@@ -47,6 +47,55 @@ public class UpdaterPathTraversalTests
     }
 
     [Fact]
+    public void SanitizePathArgument_NullOrEmpty_ReturnsNull()
+    {
+        Assert.Null(Program.SanitizePathArgument(null));
+        Assert.Null(Program.SanitizePathArgument(""));
+    }
+
+    [Fact]
+    public void ResolveEntryPath_InstallDirWithTrailingSlash_ResolvesInside()
+    {
+        var destination = Program.ResolveEntryPath("C:\\app\\", "sub\\file.dll");
+
+        Assert.Equal(Path.GetFullPath("C:\\app\\sub\\file.dll"), destination);
+    }
+
+    [Fact]
+    public void ResolveEntryPath_DotDotWithForwardSlashes_Throws()
+    {
+        Assert.Throws<IOException>(() => Program.ResolveEntryPath("C:\\app", "../../evil.dll"));
+    }
+
+    [Fact]
+    public void ResolveEntryPath_NestedDotDot_ResolvingInside_IsAllowed()
+    {
+        // "sub\..\file.dll" normalizes back into the install directory; only
+        // traversal that escapes it is rejected.
+        var destination = Program.ResolveEntryPath("C:\\app", "sub\\..\\file.dll");
+
+        Assert.Equal(Path.GetFullPath("C:\\app\\file.dll"), destination);
+    }
+
+    [Fact]
+    public void IsSkippableEntry_Null_IsSkipped()
+    {
+        Assert.True(Program.IsSkippableEntry(null));
+    }
+
+    [Fact]
+    public void VerifySha256_WhitespaceHash_SkipsCheck()
+    {
+        // Older main app versions pass no hash; a blank one must behave the same.
+        var bytes = Encoding.UTF8.GetBytes("anything");
+        using var stream = new MemoryStream(bytes);
+
+        Program.VerifySha256(stream, "   ");
+
+        Assert.Equal(0, stream.Position);
+    }
+
+    [Fact]
     public void ResolveInstallDirectory_StrayQuote_ResolvesToExistingDirectory()
     {
         var dir = Path.Combine(Path.GetTempPath(), "Encodex-Test-Dir");

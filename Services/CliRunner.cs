@@ -120,7 +120,18 @@ public static class CliRunner
         var items = new List<FileConversionItem>();
         foreach (var file in matched)
         {
-            var detection = detector.Detect(file.FullPath);
+            // A file that vanished or turned unreadable between the scan and this
+            // read must not crash the batch: degrade it to "unknown", which the
+            // converter copies as-is.
+            DetectionResult detection;
+            try
+            {
+                detection = detector.Detect(file.FullPath);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                detection = new DetectionResult();
+            }
             items.Add(new FileConversionItem
             {
                 RelativePath = file.RelativePath,

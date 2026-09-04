@@ -180,4 +180,86 @@ public class FileScannerTests : IDisposable
 
         Assert.Empty(results);
     }
+
+    [Fact]
+    public void Scan_SkipsHiddenAndSystemFiles()
+    {
+        var hidden = Path.Combine(_tempDir, "Hidden.cs");
+        var system = Path.Combine(_tempDir, "System.cs");
+        File.WriteAllText(hidden, "code");
+        File.WriteAllText(system, "code");
+        File.WriteAllText(Path.Combine(_tempDir, "Normal.cs"), "code");
+        try
+        {
+            File.SetAttributes(hidden, FileAttributes.Hidden);
+            File.SetAttributes(system, FileAttributes.System);
+
+            var results = new FileScanner().Scan(_tempDir, new ExtensionProfile());
+
+            var names = results.Select(r => r.FileName).ToArray();
+            Assert.Equal(new[] { "Normal.cs" }, names);
+        }
+        finally
+        {
+            File.SetAttributes(hidden, FileAttributes.Normal);
+            File.SetAttributes(system, FileAttributes.Normal);
+        }
+    }
+
+    [Fact]
+    public void Scan_MatchesExtensionsCaseInsensitively()
+    {
+        File.WriteAllText(Path.Combine(_tempDir, "Program.CS"), "code");
+
+        var results = new FileScanner().Scan(_tempDir, new ExtensionProfile());
+
+        Assert.Single(results);
+        Assert.Equal("Program.CS", results[0].FileName);
+    }
+
+    [Fact]
+    public void Scan_DoesNotMatchExtensionlessFiles()
+    {
+        File.WriteAllText(Path.Combine(_tempDir, "Makefile"), "code");
+        File.WriteAllText(Path.Combine(_tempDir, "Real.cs"), "code");
+
+        var results = new FileScanner().Scan(_tempDir, new ExtensionProfile());
+
+        Assert.Single(results);
+        Assert.Equal("Real.cs", results[0].FileName);
+    }
+
+    [Fact]
+    public void Scan_EmptyProfile_MatchesNothing()
+    {
+        File.WriteAllText(Path.Combine(_tempDir, "Real.cs"), "code");
+
+        var results = new FileScanner().Scan(_tempDir, new ExtensionProfile(loadDefaults: false));
+
+        Assert.Empty(results);
+    }
+
+    [Fact]
+    public void ScanUnmatched_SkipsBuildArtifactDirectories()
+    {
+        Directory.CreateDirectory(Path.Combine(_tempDir, "node_modules"));
+        File.WriteAllText(Path.Combine(_tempDir, "node_modules", "lib.js"), "js");
+        File.WriteAllText(Path.Combine(_tempDir, "image.png"), "png");
+
+        var results = new FileScanner().ScanUnmatched(_tempDir, new ExtensionProfile());
+
+        Assert.Single(results);
+        Assert.EndsWith("image.png", results[0]);
+    }
+
+    [Fact]
+    public void Scan_PopulatesFileSize()
+    {
+        var path = Path.Combine(_tempDir, "Sized.cs");
+        File.WriteAllBytes(path, new byte[123]);
+
+        var results = new FileScanner().Scan(_tempDir, new ExtensionProfile());
+
+        Assert.Equal(123, Assert.Single(results).FileSize);
+    }
 }

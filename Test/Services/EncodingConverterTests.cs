@@ -22,6 +22,14 @@ public class EncodingConverterTests : IDisposable
 
     public void Dispose()
     {
+        // The replace-failure fixtures leave ReadOnly attributes behind, which
+        // Directory.Delete refuses to remove; clear them so no test leaks scratch.
+        try
+        {
+            foreach (var file in Directory.GetFiles(_tempDir, "*", SearchOption.AllDirectories))
+                File.SetAttributes(file, FileAttributes.Normal);
+        }
+        catch { }
         try { Directory.Delete(_tempDir, recursive: true); } catch { }
     }
 
@@ -645,6 +653,400 @@ public class EncodingConverterTests : IDisposable
         // The Skipped item still advances progress so the bar deterministically reaches Total.
         Assert.Equal(2, progress.Updates.Max(u => u.Processed));
         Assert.Equal(2, progress.Updates.Max(u => u.Total));
+    }
+
+    // ---- 回归：转换的临时文件不得占用（覆盖并销毁）项目中真实存在的同名文件 ----
+
+    [Fact]
+    public async Task ConvertAsync_OverwriteInPlace_KeepsExistingSiblingTmpFileIntact()
+    {
+        var gbk = Encoding.GetEncoding("GBK");
+        var text = Path.Combine(_sourceDir, "a.txt");
+        File.WriteAllBytes(text, gbk.GetBytes("你好世界"));
+
+        // A real file that happens to sit exactly where the converter used to park
+        // its scratch copy. It is not part of the conversion; it must survive it.
+        var neighbour = Path.Combine(_sourceDir, "a.txt.tmp");
+        var neighbourBytes = new byte[] { 0x01, 0x02, 0x03, 0x04 };
+        File.WriteAllBytes(neighbour, neighbourBytes);
+
+        var item = new FileConversionItem
+        {
+            RelativePath = "a.txt",
+            FileName = "a.txt",
+            FileSize = new FileInfo(text).Length,
+            DetectedEncoding = "GBK",
+            TargetEncoding = "utf-8",
+            IsSelected = true
+        };
+
+        await new EncodingConverter().ConvertAsync(
+            new List<FileConversionItem> { item },
+            _sourceDir, _sourceDir, new UTF8Encoding(false), overwriteInPlace: true);
+
+        Assert.Equal(ConversionStatus.Success, item.Status);
+        Assert.True(File.Exists(neighbour), "转换过程覆盖了同目录下的真实 a.txt.tmp 文件");
+        Assert.Equal(neighbourBytes, File.ReadAllBytes(neighbour));
+    }
+
+    // ---- TryReplaceFile / TryRestoreBackup：替换失败绝不允许丢数据 ----
+
+    [Fact]
+    public void TryReplaceFile_Success_ReplacesContentAndLeavesNoScratchLeftovers()
+    {
+        var target = Path.Combine(_sourceDir, "run.bat");
+        File.WriteAllBytes(target, Encoding.ASCII.GetBytes("old"));
+        // ReplaceFile 保留被替换文件的属性，替换后不得丢失。
+        File.SetAttributes(target, FileAttributes.Hidden | FileAttributes.Archive);
+
+        var temp = target + ".1a2b3c4d.tmp";
+        File.WriteAllBytes(temp, Encoding.ASCII.GetBytes("new"));
+
+        var ok = EncodingConverter.TryReplaceFile(temp, target, out var error);
+
+        Assert.True(ok, error?.Message);
+        Assert.Equal("new", File.ReadAllText(target));
+        Assert.True(File.GetAttributes(target).HasFlag(FileAttributes.Hidden),
+            "替换后目标的属性必须保留");
+        Assert.Empty(Directory.GetFiles(_sourceDir, "*" + EncodingConverter.BackupExtension));
+    }
+
+    [Fact]
+    public void TryReplaceFile_MissingDestination_MovesIntoPlace()
+    {
+        var target = Path.Combine(_sourceDir, "new.txt");
+        var temp = target + ".1a2b3c4d.tmp";
+        File.WriteAllBytes(temp, Encoding.ASCII.GetBytes("converted"));
+
+        var ok = EncodingConverter.TryReplaceFile(temp, target, out var error);
+
+        Assert.True(ok, error?.Message);
+        Assert.Equal("converted", File.ReadAllText(target));
+        Assert.False(File.Exists(temp));
+    }
+
+    [Fact]
+    public void TryReplaceFile_Failure_KeepsOriginalBytesAndDropsBackup()
+    {
+        var target = Path.Combine(_sourceDir, "run.bat");
+        var original = Encoding.ASCII.GetBytes("original");
+        File.WriteAllBytes(target, original);
+        File.SetAttributes(target, FileAttributes.ReadOnly);   // File.Replace 必定失败
+
+        var temp = target + ".1a2b3c4d.tmp";
+        File.WriteAllBytes(temp, Encoding.ASCII.GetBytes("converted"));
+
+        var ok = EncodingConverter.TryReplaceFile(temp, target, out var error);
+
+        Assert.False(ok);
+        Assert.NotNull(error);
+        Assert.True(File.Exists(target), "替换失败后目标文件不能消失");
+        Assert.Equal(original, File.ReadAllBytes(target));
+        // 备份在目标完好时是冗余的，必须被清理而不是留在项目里。
+        Assert.Empty(Directory.GetFiles(_sourceDir, "*" + EncodingConverter.BackupExtension));
+    }
+
+    [Fact]
+    public void TryRestoreBackup_MissingDestination_RestoresOriginalBytes()
+    {
+        // ReplaceFile 的 ERROR_UNABLE_TO_MOVE_REPLACEMENT(1176) 在备份名为 null 时
+        // 留下的正是这个状态：目标已消失、只剩备份与临时文件。恢复是唯一的自救路径。
+        var target = Path.Combine(_sourceDir, "run.bat");
+        var original = Encoding.ASCII.GetBytes("original-bytes");
+        var backup = target + EncodingConverter.BackupExtension;
+        File.WriteAllBytes(backup, original);
+
+        var restored = EncodingConverter.TryRestoreBackup(target, backup);
+
+        Assert.True(restored);
+        Assert.True(File.Exists(target));
+        Assert.Equal(original, File.ReadAllBytes(target));
+        Assert.False(File.Exists(backup));
+    }
+
+    [Fact]
+    public void TryRestoreBackup_ExistingDestination_KeepsDestinationAndDropsBackup()
+    {
+        var target = Path.Combine(_sourceDir, "run.bat");
+        File.WriteAllBytes(target, Encoding.ASCII.GetBytes("current"));
+        var backup = target + EncodingConverter.BackupExtension;
+        File.WriteAllBytes(backup, Encoding.ASCII.GetBytes("stale-original"));
+
+        var restored = EncodingConverter.TryRestoreBackup(target, backup);
+
+        Assert.False(restored);   // 目标完好，无需恢复
+        Assert.Equal("current", File.ReadAllText(target));   // 不得被过时备份覆盖
+        Assert.False(File.Exists(backup));
+    }
+
+    // ---- 边界与失败路径 ----
+
+    [Fact]
+    public async Task ConvertAsync_EmptyList_ReturnsZeroSummary()
+    {
+        var summary = await new EncodingConverter().ConvertAsync(
+            new List<FileConversionItem>(),
+            _sourceDir, _outputDir, new UTF8Encoding(false));
+
+        Assert.Equal(0, summary.Success);
+        Assert.Equal(0, summary.Skipped);
+        Assert.Equal(0, summary.Failed);
+        Assert.Equal(0, summary.Copied);
+    }
+
+    [Fact]
+    public async Task ConvertAsync_UnselectedItems_AreIgnored()
+    {
+        var filePath = Path.Combine(_sourceDir, "a.txt");
+        File.WriteAllText(filePath, "hello");
+
+        var item = new FileConversionItem
+        {
+            RelativePath = "a.txt",
+            FileName = "a.txt",
+            FileSize = 5,
+            DetectedEncoding = "utf-8",
+            TargetEncoding = "GBK",
+            IsSelected = false
+        };
+
+        var summary = await new EncodingConverter().ConvertAsync(
+            new List<FileConversionItem> { item },
+            _sourceDir, _outputDir, Encoding.GetEncoding("GBK"));
+
+        Assert.Equal(0, summary.Success);
+        Assert.False(File.Exists(Path.Combine(_outputDir, "a.txt")));
+        // An ignored item keeps its Pending status; it was never touched.
+        Assert.Equal(ConversionStatus.Pending, item.Status);
+    }
+
+    [Fact]
+    public async Task ConvertAsync_AlreadyCancelledToken_ThrowsWithoutWriting()
+    {
+        var filePath = Path.Combine(_sourceDir, "a.txt");
+        File.WriteAllText(filePath, "hello");
+
+        var item = new FileConversionItem
+        {
+            RelativePath = "a.txt",
+            FileName = "a.txt",
+            FileSize = 5,
+            DetectedEncoding = "utf-8",
+            TargetEncoding = "GBK",
+            IsSelected = true
+        };
+
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            new EncodingConverter().ConvertAsync(
+                new List<FileConversionItem> { item },
+                _sourceDir, _outputDir, Encoding.GetEncoding("GBK"),
+                cancellationToken: cts.Token));
+
+        Assert.False(File.Exists(Path.Combine(_outputDir, "a.txt")));
+    }
+
+    [Fact]
+    public async Task ConvertAsync_MissingSourceFile_CountsAsFailed()
+    {
+        var item = new FileConversionItem
+        {
+            RelativePath = "gone.txt",
+            FileName = "gone.txt",
+            FileSize = 5,
+            DetectedEncoding = "utf-8",
+            TargetEncoding = "GBK",
+            IsSelected = true
+        };
+
+        var summary = await new EncodingConverter().ConvertAsync(
+            new List<FileConversionItem> { item },
+            _sourceDir, _outputDir, Encoding.GetEncoding("GBK"));
+
+        Assert.Equal(1, summary.Failed);
+        Assert.Equal(ConversionStatus.Failed, item.Status);
+        Assert.False(string.IsNullOrEmpty(item.StatusMessage));
+    }
+
+    [Fact]
+    public async Task ConvertAsync_Utf16LeBom_ToUtf16LeNoBom_StripsPreamble()
+    {
+        // Same code page, different BOM intent: a real conversion must run, and the
+        // U+FEFF the BOM decodes to must not leak into the output text.
+        var utf16Bom = new UnicodeEncoding(false, true);
+        var filePath = Path.Combine(_sourceDir, "test.txt");
+        File.WriteAllBytes(filePath,
+            utf16Bom.GetPreamble().Concat(utf16Bom.GetBytes("你好")).ToArray());
+
+        var item = new FileConversionItem
+        {
+            RelativePath = "test.txt",
+            FileName = "test.txt",
+            FileSize = new FileInfo(filePath).Length,
+            DetectedEncoding = "utf-16LE",
+            TargetEncoding = "UTF-16 LE",
+            IsSelected = true
+        };
+
+        var summary = await new EncodingConverter().ConvertAsync(
+            new List<FileConversionItem> { item },
+            _sourceDir, _outputDir, new UnicodeEncoding(false, false));
+
+        var outputBytes = File.ReadAllBytes(Path.Combine(_outputDir, "test.txt"));
+        Assert.False(outputBytes.Length >= 2 && outputBytes[0] == 0xFF && outputBytes[1] == 0xFE,
+            "无 BOM 目标的输出不得以 FF FE 开头");
+        Assert.Equal("你好", new UnicodeEncoding(false, false).GetString(outputBytes));
+        Assert.Equal(ConversionStatus.Success, item.Status);
+        Assert.Equal(1, summary.Success);
+    }
+
+    [Fact]
+    public async Task ConvertAsync_LargeFile_StreamsCorrectly()
+    {
+        // Bigger than the 64KB conversion buffer: the streaming decode/re-encode
+        // loop must stitch the chunks without loss or duplication.
+        var gbk = Encoding.GetEncoding("GBK");
+        var chunk = "编码转换流式处理测试文本，重复多次以超过内部缓冲区大小。";
+        var expectedText = string.Concat(Enumerable.Repeat(chunk, 6000));
+        var filePath = Path.Combine(_sourceDir, "big.txt");
+        File.WriteAllBytes(filePath, gbk.GetBytes(expectedText));
+        Assert.True(new FileInfo(filePath).Length > 64 * 1024);
+
+        var item = new FileConversionItem
+        {
+            RelativePath = "big.txt",
+            FileName = "big.txt",
+            FileSize = new FileInfo(filePath).Length,
+            DetectedEncoding = "GBK",
+            TargetEncoding = "utf-8",
+            IsSelected = true
+        };
+
+        var summary = await new EncodingConverter().ConvertAsync(
+            new List<FileConversionItem> { item },
+            _sourceDir, _outputDir, new UTF8Encoding(false));
+
+        Assert.Equal(1, summary.Success);
+        Assert.Equal(expectedText,
+            File.ReadAllText(Path.Combine(_outputDir, "big.txt"), new UTF8Encoding(false)));
+    }
+
+    [Fact]
+    public async Task ConvertAsync_OverwriteInPlace_ReadOnlyTarget_FailsAndKeepsOriginal()
+    {
+        // File.Replace refuses a read-only destination: the conversion must fail
+        // cleanly, the original bytes must survive, and the pre-rewrite backup
+        // must still exist as the recovery path.
+        var gbk = Encoding.GetEncoding("GBK");
+        var original = gbk.GetBytes("你好世界");
+        var filePath = Path.Combine(_sourceDir, "locked.txt");
+        File.WriteAllBytes(filePath, original);
+        File.SetAttributes(filePath, FileAttributes.ReadOnly);
+
+        var item = new FileConversionItem
+        {
+            RelativePath = "locked.txt",
+            FileName = "locked.txt",
+            FileSize = original.Length,
+            DetectedEncoding = "GBK",
+            TargetEncoding = "utf-8",
+            IsSelected = true
+        };
+
+        ConversionSummary? summary = null;
+        try
+        {
+            summary = await new EncodingConverter().ConvertAsync(
+                new List<FileConversionItem> { item },
+                _sourceDir, _sourceDir, new UTF8Encoding(false), overwriteInPlace: true);
+
+            Assert.Equal(1, summary.Failed);
+            Assert.Equal(ConversionStatus.Failed, item.Status);
+            Assert.Equal(original, File.ReadAllBytes(filePath));
+            Assert.NotNull(summary.BackupDirectory);
+            Assert.True(File.Exists(Path.Combine(summary.BackupDirectory!, "locked.txt")),
+                "失败的原地转换必须保留备份作为恢复路径");
+        }
+        finally
+        {
+            File.SetAttributes(filePath, FileAttributes.Normal);
+            if (summary?.BackupDirectory != null)
+            {
+                try { Directory.Delete(summary.BackupDirectory, recursive: true); } catch { }
+            }
+        }
+    }
+
+    [Fact]
+    public async Task ConvertAsync_ProgressReportsEveryFileExactlyOnce()
+    {
+        var items = new List<FileConversionItem>();
+        for (int i = 0; i < 5; i++)
+        {
+            var name = $"f{i}.txt";
+            File.WriteAllText(Path.Combine(_sourceDir, name), "hello");
+            items.Add(new FileConversionItem
+            {
+                RelativePath = name,
+                FileName = name,
+                FileSize = 5,
+                DetectedEncoding = "utf-8",
+                TargetEncoding = "GBK",
+                IsSelected = true
+            });
+        }
+
+        var progress = new CollectingProgress();
+        await new EncodingConverter().ConvertAsync(
+            items, _sourceDir, _outputDir, Encoding.GetEncoding("GBK"), progress);
+
+        // Concurrent completion makes the emission order nondeterministic, but the
+        // set of reported Processed values must be exactly 1..N with a stable Total.
+        Assert.Equal(
+            new[] { 1, 2, 3, 4, 5 },
+            progress.Updates.Select(u => u.Processed).OrderBy(v => v).ToArray());
+        Assert.All(progress.Updates, u => Assert.Equal(5, u.Total));
+    }
+
+    [Fact]
+    public async Task CopyUnmatchedFilesAsync_EmptyList_ReturnsEmptyWithoutProgress()
+    {
+        var progress = new CollectingProgress();
+
+        var result = await new EncodingConverter().CopyUnmatchedFilesAsync(
+            _sourceDir, _outputDir, new List<string>(), progress);
+
+        Assert.Equal(0, result.Copied);
+        Assert.Equal(0, result.Failed);
+        Assert.Empty(progress.Updates);
+    }
+
+    [Fact]
+    public async Task CopyUnmatchedFilesAsync_PreservesNestedDirectoryStructure()
+    {
+        var nested = Path.Combine(_sourceDir, "sub", "deep");
+        Directory.CreateDirectory(nested);
+        var filePath = Path.Combine(nested, "img.png");
+        File.WriteAllBytes(filePath, new byte[] { 0x89, 0x50 });
+
+        var result = await new EncodingConverter().CopyUnmatchedFilesAsync(
+            _sourceDir, _outputDir, new List<string> { filePath });
+
+        Assert.Equal(1, result.Copied);
+        Assert.Equal(Path.Combine("sub", "deep", "img.png"), Assert.Single(result.CopiedFiles));
+        Assert.True(File.Exists(Path.Combine(_outputDir, "sub", "deep", "img.png")));
+    }
+
+    [Fact]
+    public void GetEncodingFolderName_DistinguishesBomVariants()
+    {
+        Assert.Equal("utf-8", EncodingConverter.GetEncodingFolderName(new UTF8Encoding(false)));
+        Assert.Equal("utf-8-bom", EncodingConverter.GetEncodingFolderName(new UTF8Encoding(true)));
+        Assert.Equal("utf-16", EncodingConverter.GetEncodingFolderName(new UnicodeEncoding(false, false)));
+        // Code page 936's canonical WebName is "gb2312" even when requested as "GBK".
+        Assert.Equal("gb2312", EncodingConverter.GetEncodingFolderName(Encoding.GetEncoding("GBK")));
     }
 
     /// <summary>Synchronous IProgress collector: Progress&lt;T&gt; would marshal

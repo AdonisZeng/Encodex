@@ -97,6 +97,8 @@
   <data name="Conv_DecodeFailed" xml:space="preserve"><value>解码失败，原样复制</value></data>
   <data name="Conv_EncodeFailed" xml:space="preserve"><value>目标编码无法表示部分字符，原样复制</value></data>
   <data name="Conv_BackupFailed" xml:space="preserve"><value>备份失败，已跳过该文件</value></data>
+  <data name="Conv_ReplaceFailed" xml:space="preserve"><value>文件替换失败</value></data>
+  <data name="Conv_TempKept" xml:space="preserve"><value>替换失败且原文件未能恢复，转换结果保留在 {0}</value></data>
   <data name="Upd_NetworkError" xml:space="preserve"><value>无法获取版本信息，请检查网络连接。</value></data>
   <data name="Upd_MissingVersion" xml:space="preserve"><value>update.xml 缺少 version 节点</value></data>
   <data name="Upd_MissingUrl" xml:space="preserve"><value>update.xml 缺少 url 节点</value></data>

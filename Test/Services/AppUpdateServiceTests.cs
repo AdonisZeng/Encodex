@@ -105,6 +105,43 @@ public class AppUpdateServiceTests
         Assert.Null(await service.CheckAsync());
     }
 
+    [Fact]
+    public async Task CheckAsync_SameVersion_ReturnsNull()
+    {
+        var service = CreateService(
+            $"<update><version>{AppUpdateService.CurrentVersion}</version><url>http://x/z.zip</url></update>");
+
+        Assert.Null(await service.CheckAsync());
+    }
+
+    [Fact]
+    public async Task FetchLatestAsync_MissingUrl_Throws()
+    {
+        var service = CreateService("<update><version>9.9.9.9</version></update>");
+
+        await Assert.ThrowsAsync<UpdateException>(() => service.FetchLatestAsync());
+    }
+
+    [Fact]
+    public async Task FetchLatestAsync_OptionalElements_HaveDefaults()
+    {
+        var service = CreateService("<update><version>9.9.9.9</version><url>http://x/z.zip</url></update>");
+
+        var info = await service.FetchLatestAsync();
+
+        Assert.Null(info.Sha256);
+        Assert.False(info.Mandatory);
+        Assert.Equal("", info.Notes);
+    }
+
+    [Fact]
+    public async Task FetchLatestAsync_InvalidVersion_ThrowsUpdateException()
+    {
+        var service = CreateService("<update><version>not.a.version</version><url>http://x/z.zip</url></update>");
+
+        await Assert.ThrowsAsync<UpdateException>(() => service.FetchLatestAsync());
+    }
+
     // ---- download & SHA-256 verification ----
 
     [Fact]
@@ -169,6 +206,93 @@ public class AppUpdateServiceTests
         {
             File.Delete(path);
         }
+    }
+
+    [Fact]
+    public async Task DownloadAsync_WithoutSha256_Succeeds()
+    {
+        // A manifest may omit the hash; verification is then skipped entirely.
+        var bytes = Encoding.UTF8.GetBytes("unsigned payload");
+        var service = CreateDownloadService(bytes);
+        var info = new UpdateInfo
+        {
+            Version = new Version(9, 9, 9, 6),
+            DownloadUrl = "https://x/z.zip",
+            Sha256 = null
+        };
+
+        var path = await service.DownloadAsync(info);
+        try
+        {
+            Assert.Equal(bytes, File.ReadAllBytes(path));
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public async Task DownloadAsync_WhitespaceSha256_SkipsVerification()
+    {
+        var bytes = Encoding.UTF8.GetBytes("unsigned payload");
+        var service = CreateDownloadService(bytes);
+        var info = new UpdateInfo
+        {
+            Version = new Version(9, 9, 9, 5),
+            DownloadUrl = "https://x/z.zip",
+            Sha256 = "   "
+        };
+
+        var path = await service.DownloadAsync(info);
+        try
+        {
+            Assert.Equal(bytes, File.ReadAllBytes(path));
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public async Task DownloadAsync_HttpErrorStatus_ThrowsAndLeavesNoFile()
+    {
+        var handler = new FakeHttpMessageHandler(_ =>
+            new HttpResponseMessage(HttpStatusCode.InternalServerError));
+        var service = new AppUpdateService("http://localhost/update.xml", new HttpClient(handler));
+        var info = new UpdateInfo
+        {
+            Version = new Version(9, 9, 9, 4),
+            DownloadUrl = "https://x/z.zip"
+        };
+
+        await Assert.ThrowsAsync<UpdateException>(() => service.DownloadAsync(info));
+
+        var tempZip = Path.Combine(Path.GetTempPath(), $"Encodex-update-{info.Version}.zip");
+        Assert.False(File.Exists(tempZip));
+    }
+
+    [Fact]
+    public async Task DownloadAsync_Cancelled_ThrowsAndDeletesTempFile()
+    {
+        var bytes = Encoding.UTF8.GetBytes("payload that will never finish");
+        var service = CreateDownloadService(bytes);
+        var info = new UpdateInfo
+        {
+            Version = new Version(9, 9, 9, 3),
+            DownloadUrl = "https://x/z.zip"
+        };
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            service.DownloadAsync(info, cancellationToken: cts.Token));
+
+        // Cancellation is not a download failure, but the half-written zip must
+        // still be cleaned up.
+        var tempZip = Path.Combine(Path.GetTempPath(), $"Encodex-update-{info.Version}.zip");
+        Assert.False(File.Exists(tempZip));
     }
 
     [Fact]
@@ -355,6 +479,10 @@ public class AppUpdateServiceTests
 
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
+            // A real handler observes cancellation; the fake must do the same or
+            // cancellation-path tests silently complete the whole operation.
+            if (cancellationToken.IsCancellationRequested)
+                return Task.FromCanceled<HttpResponseMessage>(cancellationToken);
             try { return Task.FromResult(_respond(request)); }
             catch (Exception ex) { return Task.FromException<HttpResponseMessage>(ex); }
         }

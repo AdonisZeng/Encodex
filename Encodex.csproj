@@ -46,8 +46,8 @@
   </ItemGroup>
 
   <ItemGroup>
-    <Compile Remove="Encodex.Tests\**" />
-    <None Remove="Encodex.Tests\**" />
+    <Compile Remove="Test\**" />
+    <None Remove="Test\**" />
     <Compile Remove="Encodex.Updater\**" />
     <None Remove="Encodex.Updater\**" />
   </ItemGroup>

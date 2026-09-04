@@ -41,6 +41,19 @@ public class EncodingConverter
 {
     private const int BufferSize = 64 * 1024;
 
+    /// <summary>Extension of the scratch file a conversion is written to before it
+    /// replaces its target.</summary>
+    private const string TempExtension = ".tmp";
+
+    /// <summary>Extension of the backup ReplaceFile parks the target under for the
+    /// duration of a swap. Passing a backup name is what makes a failed swap
+    /// recoverable: with a null backup ReplaceFile's ERROR_UNABLE_TO_MOVE_REPLACEMENT
+    /// destroys the target and leaves only the scratch file behind.</summary>
+    internal const string BackupExtension = ".encx-bak";
+
+    /// <summary>Length of the random infix that keeps scratch file names unique.</summary>
+    private const int ScratchIdLength = 8;
+
     /// <summary>Cap on concurrent file conversions: disk-bound work does not scale
     /// past a handful of parallel streams. Scanning, backing up and copying unmatched
     /// files reuse the same cap so every phase behaves the same on the same disk.</summary>
@@ -153,7 +166,7 @@ public class EncodingConverter
     /// (offset 0); the conversion phase continues from ConvertAsync's progressOffset.
     /// Files are copied concurrently: the pass is disk-bound and a serial walk
     /// dominates the total time on large trees.</summary>
-    private static async Task<string?> BackupFilesAsync(
+    private static async Task<string> BackupFilesAsync(
         List<FileConversionItem> items,
         string sourceDirectory,
         IProgress<ConversionProgress>? progress,
@@ -240,6 +253,9 @@ public class EncodingConverter
             Directory.CreateDirectory(Path.GetDirectoryName(outputPath)!);
 
         string? tempPath = null;
+        // Set when a failed swap left the destination missing: the scratch file then
+        // holds the only surviving copy of the content and must not be cleaned up.
+        var keepTemp = false;
         try
         {
             var sourceEncoding = GetStrictEncodingFromName(item.DetectedEncoding);
@@ -295,13 +311,32 @@ public class EncodingConverter
                 // return the rewritten file's own (current) timestamps.
                 var capturedTimestamps = overwriteInPlace ? TryCaptureTimestamps(sourcePath) : null;
 
-                tempPath = outputPath + ".tmp";
+                tempPath = MakeScratchPath(outputPath, TempExtension);
                 await ConvertFileAsync(sourceStream, tempPath, sourceEncoding, target, targetPreamble, cancellationToken);
 
                 sourceStream.Dispose();
                 sourceStream = null;
 
-                ReplaceFile(tempPath, outputPath);
+                if (!TryReplaceFile(tempPath, outputPath, out var replaceError))
+                {
+                    // Non-in-place mode still owns an untouched source: copy it across
+                    // so the output tree stays complete even though this file failed.
+                    if (!overwriteInPlace)
+                    {
+                        try { CopyFile(sourcePath, outputPath); } catch { }
+                    }
+
+                    // TryReplaceFile restores the original from its backup, so the
+                    // destination normally still holds the pre-conversion bytes. Only
+                    // when it does not is the scratch file worth keeping.
+                    keepTemp = !File.Exists(outputPath);
+                    item.Status = ConversionStatus.Failed;
+                    item.StatusMessage = keepTemp
+                        ? string.Format(Res.Conv_TempKept, tempPath)
+                        : string.Format("{0}：{1}", Res.Conv_ReplaceFailed, replaceError!.Message);
+                    return ConvertOutcome.Failed;
+                }
+
                 tempPath = null;
                 if (capturedTimestamps is { } timestamps)
                     ApplyTimestamps(timestamps, outputPath);
@@ -350,11 +385,11 @@ public class EncodingConverter
         }
         finally
         {
-            // Do not leave a half-written temp file behind (e.g. on cancellation).
-            if (tempPath != null)
-            {
-                try { File.Delete(tempPath); } catch { }
-            }
+            // Do not leave a half-written scratch file behind (cancellation, decode
+            // failure, ...) — unless a failed swap left the destination missing, in
+            // which case the scratch file is the only surviving copy of the content.
+            if (tempPath != null && !keepTemp)
+                TryDeleteQuietly(tempPath);
         }
     }
 
@@ -584,17 +619,76 @@ public class EncodingConverter
         }
     }
 
+    /// <summary>Scratch path next to the target: <see cref="File.Replace"/> requires
+    /// the swap participants to share a volume, so the files cannot live in %TEMP%.
+    /// A random infix keeps the name unique — a fixed name would clobber a real
+    /// project file (<c>run.bat.tmp</c> is a perfectly legitimate file) and would
+    /// also collide between concurrent conversions.</summary>
+    private static string MakeScratchPath(string targetPath, string extension)
+        => $"{targetPath}.{Guid.NewGuid().ToString("N").Substring(0, ScratchIdLength)}{extension}";
+
     /// <summary>
-    /// Replaces the destination with the freshly written file. <see cref="File.Replace"/>
-    /// is atomic — the destination is never momentarily absent, so a failure mid-swap
-    /// cannot leave the user without the original file. It throws when the destination
-    /// does not exist, in which case a plain move is enough.
+    /// Replaces the destination with the freshly written scratch file, rolling back
+    /// from a backup when the swap fails. <see cref="File.Replace"/> is atomic — the
+    /// destination is never momentarily absent — but it is only recoverable when a
+    /// backup name is passed: ReplaceFile's ERROR_UNABLE_TO_MOVE_REPLACEMENT (1176)
+    /// destroys the destination otherwise, leaving only the scratch file behind.
     /// </summary>
-    private static void ReplaceFile(string source, string destination)
+    /// <returns>True when the destination now holds the scratch file's content.
+    /// False when the swap failed; the destination is then guaranteed to still exist
+    /// with its original bytes (restored from the backup, or never touched), so the
+    /// caller is safe to discard the scratch file.</returns>
+    internal static bool TryReplaceFile(string tempPath, string destination, out Exception? error)
     {
-        if (File.Exists(destination))
-            File.Replace(source, destination, destinationBackupFileName: null);
-        else
-            File.Move(source, destination);
+        error = null;
+        var backup = MakeScratchPath(destination, BackupExtension);
+        try
+        {
+            if (File.Exists(destination))
+            {
+                File.Replace(tempPath, destination, backup);
+                TryDeleteQuietly(backup);
+            }
+            else
+            {
+                File.Move(tempPath, destination);
+            }
+            return true;
+        }
+        catch (Exception ex)
+        {
+            error = ex;
+            TryRestoreBackup(destination, backup);
+            return false;
+        }
+    }
+
+    /// <summary>Undoes half of a failed <see cref="File.Replace"/>. When the
+    /// destination is gone the backup is the only copy of the original bytes and is
+    /// moved back; when the destination survived, the backup is redundant and must be
+    /// dropped — restoring it would clobber the untouched original.</summary>
+    /// <returns>True when the destination was restored from the backup.</returns>
+    internal static bool TryRestoreBackup(string destination, string backup)
+    {
+        try
+        {
+            if (File.Exists(destination) || !File.Exists(backup))
+            {
+                TryDeleteQuietly(backup);
+                return false;
+            }
+            File.Move(backup, destination);
+            return true;
+        }
+        catch
+        {
+            // Recovery is best effort: it must never mask the original swap failure.
+            return false;
+        }
+    }
+
+    private static void TryDeleteQuietly(string path)
+    {
+        try { File.Delete(path); } catch { }
     }
 }
