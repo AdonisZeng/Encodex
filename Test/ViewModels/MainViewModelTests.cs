@@ -544,6 +544,45 @@ public class MainViewModelTests : IDisposable
     }
 
     [Fact]
+    public void CanCheckForUpdates_BlockedWhileConverting()
+    {
+        var vm = CreateViewModel();
+
+        Assert.True(vm.CanCheckForUpdates);
+
+        // Replacing binaries mid-conversion would restart the app halfway through.
+        vm.IsConverting = true;
+        Assert.False(vm.CanCheckForUpdates);
+
+        vm.IsConverting = false;
+        vm.IsCheckingUpdates = true;
+        Assert.False(vm.CanCheckForUpdates);
+
+        // A running download doubles as the cancel action and stays available.
+        vm.IsDownloading = true;
+        Assert.True(vm.CanCheckForUpdates);
+    }
+
+    [Fact]
+    public async Task ConvertAsync_ReportExposesRuleSkippedFolders()
+    {
+        var dir = Path.Combine(_tempDir, "src-notcopied");
+        Directory.CreateDirectory(dir);
+        Directory.CreateDirectory(Path.Combine(dir, "node_modules"));
+        File.WriteAllText(Path.Combine(dir, "node_modules", "x.js"), "js");
+        File.WriteAllText(Path.Combine(dir, "a.txt"), "hello");
+
+        var vm = CreateViewModel();
+        vm.SourceFolderPath = dir;
+        await vm.ScanCommand.ExecuteAsync(null);
+        await vm.ConvertCommand.ExecuteAsync(null);
+
+        var section = Assert.Single(
+            vm.ReportSections, s => s.Title == Encodex.Resources.Res.VM_NotCopiedSection);
+        Assert.Contains("node_modules", section.Files);
+    }
+
+    [Fact]
     public void BackupDirectoryText_ReflectsSummaryBackup()
     {
         var vm = CreateViewModel();

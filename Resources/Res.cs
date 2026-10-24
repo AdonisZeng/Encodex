@@ -74,6 +74,8 @@ public static class Res
     public static string VM_SkippedSection => Get("VM_SkippedSection");
     public static string VM_FailedSection => Get("VM_FailedSection");
     public static string VM_CopiedSection => Get("VM_CopiedSection");
+    public static string VM_NotCopiedSection => Get("VM_NotCopiedSection");
+    public static string VM_HiddenFilesSkipped => Get("VM_HiddenFilesSkipped");
     public static string VM_CopyFailed => Get("VM_CopyFailed");
     public static string VM_CheckingUpdate => Get("VM_CheckingUpdate");
     public static string VM_UpToDate => Get("VM_UpToDate");
@@ -94,6 +96,7 @@ public static class Res
     public static string VM_CustomGroup => Get("VM_CustomGroup");
     public static string VM_MandatoryUpdate => Get("VM_MandatoryUpdate");
     public static string VM_RefreshFailed => Get("VM_RefreshFailed");
+    public static string VM_RefreshFailedShort => Get("VM_RefreshFailedShort");
     public static string VM_DuplicateExtension => Get("VM_DuplicateExtension");
     public static string VM_BackupDeleted => Get("VM_BackupDeleted");
     public static string VM_BackupDeleteFailed => Get("VM_BackupDeleteFailed");
@@ -130,11 +133,13 @@ public static class Res
     public static string Prev_ReadFailed => Get("Prev_ReadFailed");
     public static string Prev_NoPreview => Get("Prev_NoPreview");
     public static string Prev_Unrepresentable => Get("Prev_Unrepresentable");
+    public static string Prev_DecodeFailed => Get("Prev_DecodeFailed");
     public static string Prev_Truncated => Get("Prev_Truncated");
 
     // --- CliRunner ---
     public static string Cli_UnknownArg => Get("Cli_UnknownArg");
     public static string Cli_InvalidSrc => Get("Cli_InvalidSrc");
+    public static string Cli_MissingValue => Get("Cli_MissingValue");
     public static string Cli_MissingTarget => Get("Cli_MissingTarget");
     public static string Cli_UnsupportedTarget => Get("Cli_UnsupportedTarget");
     public static string Cli_ConflictOut => Get("Cli_ConflictOut");

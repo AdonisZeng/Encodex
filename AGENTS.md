@@ -1,4 +1,4 @@
-# CLAUDE.md
+# AGENTS.md
 
 本文档面向 AI 编码助手与新加入的开发者，描述 Encodex 项目的整体情况与版本发布流程。
 
@@ -144,6 +144,9 @@ dotnet test Test\Encodex.Tests.csproj -c Release   # 运行测试
   `File.Replace` 做原子替换）、无 `Path.GetRelativePath`（用 `PathHelper`）、无 `Stream.ReadExactly`；
   `Encoding.GetEncoding("utf-16LE")` 等别名可用。
 - 短文本（几字节）Ude 检测不可靠（返回 null → 原样复制）；CLI/检测相关测试需用足够长的中文样本。
+- 无 BOM 的 UTF-16/32 分支只在样本含 0x00 时进入，且要求零字节密度 ≥1%（≥4 个零字节），
+  防止「普通文本里混入一两个 NUL」被当成 UTF-16 解码后静默改写；因此**完全不含 0x00 的纯中文
+  UTF-16**（如全为 U+4E2D）与 ASCII/GBK 字节同形，按设计不识别、转换时原样复制，属已知限制。
 - 检测结果统一用对称编码名（`utf-16LE`/`utf-16BE`/`utf-32LE`/`utf-32BE`），转换端 `GetEncoding` 均能解析；
   `UnicodeEncoding(false).WebName` 是 `utf-16`（无 LE 后缀），勿用它做显示名。
 - 更新器与更新服务属高危链路：改参数转义、路径穿越防护、SHA 校验、自替换回滚时必须保留/更新对应测试。

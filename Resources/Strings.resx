@@ -66,6 +66,8 @@
   <data name="VM_SkippedSection" xml:space="preserve"><value>跳过</value></data>
   <data name="VM_FailedSection" xml:space="preserve"><value>失败</value></data>
   <data name="VM_CopiedSection" xml:space="preserve"><value>复制</value></data>
+  <data name="VM_NotCopiedSection" xml:space="preserve"><value>未复制（跳过）</value></data>
+  <data name="VM_HiddenFilesSkipped" xml:space="preserve"><value>隐藏/系统/链接项 {0} 个</value></data>
   <data name="VM_CopyFailed" xml:space="preserve"><value>（复制失败）</value></data>
   <data name="VM_CheckingUpdate" xml:space="preserve"><value>正在检查更新...</value></data>
   <data name="VM_UpToDate" xml:space="preserve"><value>当前已是最新版本 (v{0})</value></data>
@@ -87,6 +89,7 @@
   <data name="VM_UpdateFailed" xml:space="preserve"><value>检查更新失败: {0}</value></data>
   <data name="VM_ConvertFailed" xml:space="preserve"><value>转换失败: {0}</value></data>
   <data name="VM_RefreshFailed" xml:space="preserve"><value>转换完成，但无法重新检测已覆盖文件的编码；「执行转换」已锁定，请重新扫描后再试。</value></data>
+  <data name="VM_RefreshFailedShort" xml:space="preserve"><value>已改写文件的编码无法重新检测；「执行转换」已锁定，请重新扫描后再试。</value></data>
   <data name="VM_FolderDialogDescription" xml:space="preserve"><value>选择项目文件夹</value></data>
   <data name="VM_CustomGroup" xml:space="preserve"><value>自定义</value></data>
   <data name="VM_MandatoryUpdate" xml:space="preserve"><value>发现强制更新版本（当前 v{1} → 最新 v{0}）。
@@ -120,9 +123,11 @@
   <data name="Prev_ReadFailed" xml:space="preserve"><value>无法读取文件: {0}</value></data>
   <data name="Prev_NoPreview" xml:space="preserve"><value>无法预览：源编码未知。</value></data>
   <data name="Prev_Unrepresentable" xml:space="preserve"><value>（目标编码无法表示源文本中的部分字符，转换时该文件会被原样复制）</value></data>
+  <data name="Prev_DecodeFailed" xml:space="preserve"><value>检测编码无法完整解码该文件，转换时将原样复制</value></data>
   <data name="Prev_Truncated" xml:space="preserve"><value>...（共 {0} 字节，显示前 {1} 字节）</value></data>
   <data name="Cli_UnknownArg" xml:space="preserve"><value>未知参数: {0}（使用 --help 查看用法）</value></data>
   <data name="Cli_InvalidSrc" xml:space="preserve"><value>错误: --src 必须指向存在的文件夹</value></data>
+  <data name="Cli_MissingValue" xml:space="preserve"><value>错误: 参数 {0} 缺少值</value></data>
   <data name="Cli_MissingTarget" xml:space="preserve"><value>错误: 缺少 --target</value></data>
   <data name="Cli_UnsupportedTarget" xml:space="preserve"><value>错误: 不支持的目标编码 "{0}"</value></data>
   <data name="Cli_ConflictOut" xml:space="preserve"><value>错误: --overwrite 与 --out 不能同时使用</value></data>

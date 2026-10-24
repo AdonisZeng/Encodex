@@ -126,6 +126,82 @@ public class CliRunnerTests : IDisposable
     }
 
     [Fact]
+    public void Run_ExtOptionAtEndWithoutValue_ReturnsErrorAndSkipsConversion()
+    {
+        var srcDir = Path.Combine(_tempDir, "src-ext-last");
+        Directory.CreateDirectory(srcDir);
+        File.WriteAllText(Path.Combine(srcDir, "a.txt"), "hello");
+
+        var output = new StringWriter();
+        var exitCode = CliRunner.Run(
+            new[] { "--src", srcDir, "--target", "utf-8", "--ext" }, output);
+
+        Assert.Equal(2, exitCode);
+        Assert.Contains("缺少值", output.ToString());
+        // The run must stop during argument parsing: previously the empty ext
+        // list silently fell back to the defaults and converted the whole tree.
+        Assert.False(Directory.Exists(srcDir + "_utf-8"));
+    }
+
+    [Fact]
+    public void Run_OutOptionAtEndWithoutValue_ReturnsErrorCode()
+    {
+        var output = new StringWriter();
+
+        var exitCode = CliRunner.Run(
+            new[] { "--src", _tempDir, "--target", "utf-8", "--out" }, output);
+
+        Assert.Equal(2, exitCode);
+        Assert.Contains("缺少值", output.ToString());
+    }
+
+    [Fact]
+    public void Run_ExplicitEmptyOutValue_ReturnsErrorCode()
+    {
+        // An explicit empty --out used to fall through to the auto-named folder,
+        // which is exactly the silent fallback the other options no longer allow.
+        var output = new StringWriter();
+
+        var exitCode = CliRunner.Run(
+            new[] { "--src", _tempDir, "--target", "utf-8", "--out", "" }, output);
+
+        Assert.Equal(2, exitCode);
+        Assert.Contains("缺少值", output.ToString());
+        Assert.False(Directory.Exists(_tempDir + "_utf-8"));
+    }
+
+    [Fact]
+    public void Run_ExplicitEmptyExtValue_ReturnsNoValidExt()
+    {
+        var srcDir = Path.Combine(_tempDir, "src-empty-ext");
+        Directory.CreateDirectory(srcDir);
+        File.WriteAllText(Path.Combine(srcDir, "a.txt"), "hello");
+
+        var output = new StringWriter();
+        var exitCode = CliRunner.Run(
+            new[] { "--src", srcDir, "--target", "utf-8", "--ext", "" }, output);
+
+        Assert.Equal(2, exitCode);
+        Assert.Contains("没有有效的扩展名", output.ToString());
+        Assert.False(Directory.Exists(srcDir + "_utf-8"));
+    }
+
+    [Fact]
+    public void Run_WithoutExtOption_UsesDefaultExtensions()
+    {
+        var srcDir = Path.Combine(_tempDir, "src-default-ext");
+        Directory.CreateDirectory(srcDir);
+        File.WriteAllText(Path.Combine(srcDir, "a.txt"), "hello");
+
+        var output = new StringWriter();
+        var exitCode = CliRunner.Run(
+            new[] { "--src", srcDir, "--target", "utf-8" }, output);
+
+        Assert.Equal(0, exitCode);
+        Assert.True(File.Exists(Path.Combine(srcDir + "_utf-8", "a.txt")));
+    }
+
+    [Fact]
     public void Run_UnsupportedTarget_ReturnsErrorCode()
     {
         var output = new StringWriter();

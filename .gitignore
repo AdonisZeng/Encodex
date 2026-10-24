@@ -16,3 +16,6 @@ dist/
 
 # Reasonix tooling
 .reasonix/
+
+# Trae spec/workflow artifacts
+.trae/

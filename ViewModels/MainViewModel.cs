@@ -21,6 +21,17 @@ public partial class MainViewModel : ObservableObject
     private CancellationTokenSource? _cts;
     private CancellationTokenSource? _updateCts;
     private List<string> _unmatchedFiles = new();
+    private List<string> _skippedDirectories = new();
+    private int _hiddenEntryCount;
+
+    // Output folders created inside the source tree (drive-root fallback) are user
+    // artifacts, not input: rescanning them would re-convert last run's output. Kept
+    // across scans — Reset must not forget them, or the next scan re-ingests them.
+    private readonly List<string> _excludedOutputDirs = new();
+
+    /// <summary>Backup folder reported by the converter as soon as it exists, so a
+    /// cancelled conversion can still offer "delete backup" in its partial report.</summary>
+    private string? _lastBackupDirectory;
 
     /// <summary>Candidates for manually correcting a file's detected encoding.</summary>
     public string[] AvailableDetectedEncodings { get; } =
@@ -60,6 +71,7 @@ public partial class MainViewModel : ObservableObject
     [NotifyCanExecuteChangedFor(nameof(ConvertCommand))]
     [NotifyCanExecuteChangedFor(nameof(CancelCommand))]
     [NotifyCanExecuteChangedFor(nameof(ResetCommand))]
+    [NotifyCanExecuteChangedFor(nameof(CheckForUpdatesCommand))]
     private bool _isConverting;
 
     [ObservableProperty]
@@ -153,7 +165,9 @@ public partial class MainViewModel : ObservableObject
     public bool CanCancel => IsConverting;
     public bool CanReset => !IsScanning && !IsConverting;
     // While a download is running the update button doubles as "cancel download".
-    public bool CanCheckForUpdates => !IsCheckingUpdates || IsDownloading;
+    // Converting blocks it too: swapping binaries mid-conversion would leave the
+    // process running old assemblies (or restart it halfway through the work).
+    public bool CanCheckForUpdates => !IsConverting && (!IsCheckingUpdates || IsDownloading);
     public bool CanPreview => SelectedFileItem != null;
 
     /// <summary>Restores the persisted folder / encoding / extension selection.</summary>
@@ -246,23 +260,26 @@ public partial class MainViewModel : ObservableObject
             // can still edit extensions or the target encoding while the scan runs.
             var profile = SnapshotProfile();
             var targetEncodingName = SelectedEncoding!.DisplayName;
+            // Snapshot too: the background walk must not read a list the UI thread
+            // can still extend while the scan runs.
+            var excludedOutputDirs = _excludedOutputDirs.ToList();
 
             // Scanning and per-file detection are CPU/IO heavy: keep them off the UI
             // thread, and detect concurrently — each call is independent (local state
             // only) and the phase is disk-bound, so it parallelizes like the conversion.
-            var (matched, unmatched, items) = await Task.Run(() =>
+            var scan = await Task.Run(() =>
             {
-                var (m, u) = _scanner.ScanAll(path, profile);
+                var scanned = _scanner.ScanAll(path, profile, excludedOutputDirs);
 
-                var detected = new (FileScanResult File, DetectionResult Result)[m.Count];
-                Parallel.For(0, m.Count, new ParallelOptions
+                var detected = new (FileScanResult File, DetectionResult Result)[scanned.Matched.Count];
+                Parallel.For(0, scanned.Matched.Count, new ParallelOptions
                 {
                     MaxDegreeOfParallelism = Math.Min(Environment.ProcessorCount, EncodingConverter.MaxConcurrency)
-                }, i => detected[i] = (m[i], DetectSafely(m[i].FullPath)));
+                }, i => detected[i] = (scanned.Matched[i], DetectSafely(scanned.Matched[i].FullPath)));
 
                 // Detected in parallel, assembled in scan order so the list keeps the
                 // order the user saw before this change.
-                var list = new List<FileConversionItem>(m.Count);
+                var list = new List<FileConversionItem>(scanned.Matched.Count);
                 foreach (var (file, detection) in detected)
                 {
                     list.Add(new FileConversionItem
@@ -272,16 +289,19 @@ public partial class MainViewModel : ObservableObject
                         FileSize = file.FileSize,
                         DetectedEncoding = detection.EncodingName,
                         TargetEncoding = targetEncodingName,
+                        IsBinary = detection.IsBinary,
                         Status = detection.IsBinary ? ConversionStatus.Skipped : ConversionStatus.Pending,
                         StatusMessage = detection.IsBinary ? Res.VM_Binary : null
                     });
                 }
-                return (m, u, list);
+                return (Scanned: scanned, Items: list);
             });
 
-            _unmatchedFiles = unmatched;
+            _unmatchedFiles = scan.Scanned.Unmatched;
+            _skippedDirectories = scan.Scanned.SkippedDirectories;
+            _hiddenEntryCount = scan.Scanned.HiddenEntryCount;
             // One CollectionChanged notification instead of one per file.
-            FileItems.AddRange(items);
+            FileItems.AddRange(scan.Items);
 
             OnPropertyChanged(nameof(ScannedCountText));
             SelectedTabIndex = 1;
@@ -327,6 +347,15 @@ public partial class MainViewModel : ObservableObject
     [RelayCommand(CanExecute = nameof(CanConvert))]
     private async Task ConvertAsync()
     {
+        // Snapshots taken before the try: an interrupted round must reason about
+        // exactly the inputs it started with (the user can still toggle the mode or
+        // pick another folder while it runs), and the catch blocks need them to
+        // finish the already-rewritten files safely.
+        var overwriteInPlace = IsOverwriteInPlace;
+        var sourcePath = SourceFolderPath;
+        var selectedItems = new List<FileConversionItem>();
+
+        _lastBackupDirectory = null;
         IsConverting = true;
         _cts = new CancellationTokenSource();
         SelectedTabIndex = 2;
@@ -335,8 +364,6 @@ public partial class MainViewModel : ObservableObject
 
         try
         {
-            // Snapshot before any await: the user can change the mode while running.
-            var overwriteInPlace = IsOverwriteInPlace;
             var sourceFolderName = Path.GetFileName(SourceFolderPath);
             var encodingName = EncodingConverter.GetEncodingFolderName(SelectedEncoding!.Encoding);
 
@@ -368,9 +395,15 @@ public partial class MainViewModel : ObservableObject
 
                     Directory.CreateDirectory(outputDir);
                 }
+
+                // The drive-root fallback puts the output inside the source tree. The
+                // next scan must skip it, otherwise last run's output is re-ingested
+                // as fresh input (and converted again, one nesting level deeper).
+                if (IsInsideDirectory(sourcePath, outputDir))
+                    _excludedOutputDirs.Add(Path.GetFullPath(outputDir));
             }
 
-            var selectedItems = FileItems.Where(f => f.IsSelected).ToList();
+            selectedItems = FileItems.Where(f => f.IsSelected).ToList();
             // In-place mode spends one full pass backing files up before converting,
             // so that work is mirrored in the progress bar too.
             var backupCount = overwriteInPlace ? selectedItems.Count : 0;
@@ -380,7 +413,6 @@ public partial class MainViewModel : ObservableObject
             // Snapshot inputs used inside the background delegates: the user is not
             // prevented from changing the target encoding or picking a new folder
             // while a conversion runs.
-            var sourcePath = SourceFolderPath;
             var encoding = SelectedEncoding!.Encoding;
             var unmatchedFiles = _unmatchedFiles;
 
@@ -406,7 +438,8 @@ public partial class MainViewModel : ObservableObject
                 progress,
                 _cts.Token,
                 overwriteInPlace,
-                backupCount), _cts.Token);
+                backupCount,
+                dir => _lastBackupDirectory = dir), _cts.Token);
 
             // Copy unmatched files; progress continues from where conversion stopped.
             // In-place mode has nothing to copy: the unmatched files already live in
@@ -437,30 +470,43 @@ public partial class MainViewModel : ObservableObject
                 OutputPath = summary.OutputPath,
                 BackupDirectory = summary.BackupDirectory
             };
-            BuildReportSections(copyResult);
+            BuildReportSections(copyResult, overwriteInPlace);
 
             // In-place conversion rewrote the source files, so the scan-time
             // DetectedEncoding is stale: converting again from it would decode the
-            // new bytes with the old encoding and corrupt the content.
-            if (overwriteInPlace && !await RefreshDetectedEncodingsAsync(selectedItems, sourcePath))
+            // new bytes with the old encoding and corrupt the content. A failed
+            // refresh locks the button, and that reason must survive into the status
+            // text instead of being overwritten by the ordinary completion message.
+            var refreshFailed = false;
+            if (overwriteInPlace)
+                refreshFailed = !await RefreshDetectedEncodingsAsync(selectedItems, sourcePath);
+            if (refreshFailed)
                 HasConverted = true;
 
             SelectedTabIndex = 3;
-            StatusText = string.Format(Res.VM_ConvertDone,
+            var doneText = string.Format(Res.VM_ConvertDone,
                 summary.Success, summary.Skipped, summary.Failed + copyResult.Failed, summary.Copied + copyResult.Copied);
+            StatusText = refreshFailed ? $"{doneText} {Res.VM_RefreshFailedShort}" : doneText;
         }
         catch (OperationCanceledException)
         {
-            StatusText = Res.VM_ConvertCancelled;
-            BuildPartialReport(outputDir);
+            // Finish the safety pass before publishing the report: files already
+            // rewritten in place carry new bytes, so their scan-time detection is stale.
+            var refreshFailed = await FinishInterruptedConversionAsync(overwriteInPlace, selectedItems, sourcePath);
+            StatusText = refreshFailed
+                ? $"{Res.VM_ConvertCancelled} {Res.VM_RefreshFailedShort}"
+                : Res.VM_ConvertCancelled;
+            BuildPartialReport(outputDir, overwriteInPlace);
         }
         catch (Exception ex)
         {
             // Unexpected failure (e.g. I/O error while backing up): surface it here,
             // otherwise the exception vanishes inside the async command and the UI
             // stays stuck on "正在转换" with no report at all.
-            StatusText = string.Format(Res.VM_ConvertFailed, ex.Message);
-            BuildPartialReport(outputDir);
+            var refreshFailed = await FinishInterruptedConversionAsync(overwriteInPlace, selectedItems, sourcePath);
+            var failedText = string.Format(Res.VM_ConvertFailed, ex.Message);
+            StatusText = refreshFailed ? $"{failedText} {Res.VM_RefreshFailedShort}" : failedText;
+            BuildPartialReport(outputDir, overwriteInPlace);
         }
         finally
         {
@@ -468,6 +514,49 @@ public partial class MainViewModel : ObservableObject
             _cts?.Dispose();
             _cts = null;
         }
+    }
+
+    /// <summary>Safety net for a cancelled or failed in-place round: files already
+    /// rewritten must be re-detected, otherwise a later conversion would decode their
+    /// new bytes with the stale encoding and corrupt them. A failed refresh locks
+    /// conversion until a fresh scan, exactly like the completed path does.</summary>
+    /// <returns>True when the refresh failed and conversion is now locked; the caller
+    /// must surface that reason in its status text instead of hiding it.</returns>
+    private async Task<bool> FinishInterruptedConversionAsync(
+        bool overwriteInPlace,
+        List<FileConversionItem> selectedItems,
+        string sourcePath)
+    {
+        // Non-in-place runs never touch the source bytes: their output tree holds the
+        // conversions, so there is nothing whose detection could have gone stale.
+        if (!overwriteInPlace || !selectedItems.Any(i => i.Status == ConversionStatus.Success))
+            return false;
+
+        bool refreshed;
+        try
+        {
+            refreshed = await RefreshDetectedEncodingsAsync(selectedItems, sourcePath);
+        }
+        catch
+        {
+            // RefreshDetectedEncodingsAsync handles its own I/O failures, but an
+            // unexpected one must still lock conversion rather than escape the catch.
+            refreshed = false;
+        }
+
+        if (!refreshed)
+            HasConverted = true;
+        return !refreshed;
+    }
+
+    /// <summary>True when <paramref name="child"/> lies below <paramref name="parent"/>.
+    /// Compares through <see cref="PathHelper.GetRelativePath"/> (case-insensitive,
+    /// path string only) instead of a textual prefix: "C:\src2" must not count as a
+    /// child of "C:\src", and the output folder need not exist yet.</summary>
+    private static bool IsInsideDirectory(string parent, string child)
+    {
+        var relative = PathHelper.GetRelativePath(parent, child);
+        return relative.Length > 0 && !relative.StartsWith("..", StringComparison.Ordinal);
     }
 
     [RelayCommand(CanExecute = nameof(CanCancel))]
@@ -562,8 +651,11 @@ public partial class MainViewModel : ObservableObject
     }
 
     /// <summary>Builds the expandable report sections with concrete file lists.
-    /// Status semantics match the summary counters: "原样复制" items are Copied.</summary>
-    private void BuildReportSections(UnmatchedCopyResult copyResult)
+    /// Status semantics match the summary counters: "原样复制" items are Copied.
+    /// <paramref name="overwriteInPlace"/> is the round's snapshot, not the live
+    /// checkbox: the mode can be toggled while a conversion runs, and the report
+    /// must describe what actually ran.</summary>
+    private void BuildReportSections(UnmatchedCopyResult copyResult, bool overwriteInPlace)
     {
         static string Entry(FileConversionItem item)
             => string.IsNullOrEmpty(item.StatusMessage)
@@ -583,11 +675,23 @@ public partial class MainViewModel : ObservableObject
             .Concat(copyResult.CopiedFiles)
             .ToList();
 
+        // Only a copy run can leave input behind: in-place mode rewrites the source
+        // files and never copies anything else, so the notice would be misleading.
+        var notCopied = new List<string>();
+        if (!overwriteInPlace)
+        {
+            notCopied.AddRange(_skippedDirectories);
+            if (_hiddenEntryCount > 0)
+                notCopied.Add(string.Format(Res.VM_HiddenFilesSkipped, _hiddenEntryCount));
+        }
+
         ReportSections.Clear();
         ReportSections.Add(new ReportSection("✅", Res.VM_SuccessSection, success));
         ReportSections.Add(new ReportSection("⏭️", Res.VM_SkippedSection, skipped));
         ReportSections.Add(new ReportSection("❌", Res.VM_FailedSection, failed));
         ReportSections.Add(new ReportSection("📄", Res.VM_CopiedSection, copied));
+        if (notCopied.Count > 0)
+            ReportSections.Add(new ReportSection("🚫", Res.VM_NotCopiedSection, notCopied));
     }
 
     /// <summary>
@@ -641,8 +745,9 @@ public partial class MainViewModel : ObservableObject
     }
 
     /// <summary>Builds a best-effort report from files processed before a cancellation,
-    /// so partial results are shown instead of being discarded.</summary>
-    private void BuildPartialReport(string outputDir)
+    /// so partial results are shown instead of being discarded. <paramref name="overwriteInPlace"/>
+    /// is the round's snapshot for the same reason as <see cref="BuildReportSections"/>.</summary>
+    private void BuildPartialReport(string outputDir, bool overwriteInPlace)
     {
         foreach (var item in FileItems.Where(i => i.Status == ConversionStatus.Pending))
             item.Status = ConversionStatus.Cancelled;
@@ -653,9 +758,12 @@ public partial class MainViewModel : ObservableObject
             Skipped = FileItems.Count(i => i.Status == ConversionStatus.Skipped),
             Failed = FileItems.Count(i => i.Status == ConversionStatus.Failed),
             Copied = FileItems.Count(i => i.Status == ConversionStatus.Copied),
-            OutputPath = outputDir
+            OutputPath = outputDir,
+            // A cancellation can leave a partially filled backup folder behind; the
+            // converter reports it as soon as it exists so it stays deletable.
+            BackupDirectory = _lastBackupDirectory
         };
-        BuildReportSections(new UnmatchedCopyResult());
+        BuildReportSections(new UnmatchedCopyResult(), overwriteInPlace);
         SelectedTabIndex = 3;
     }
 
@@ -724,8 +832,12 @@ public partial class MainViewModel : ObservableObject
         FileItems.Clear();
         // A stale unmatched list would be copied into the next conversion run, and a
         // stale in-place flag could rewrite files the user no longer expects: every
-        // piece of scan state is dropped, not just the visible list.
+        // piece of scan state is dropped, not just the visible list. Excluded output
+        // folders survive on purpose — they are previous runs' artifacts, not scan state.
         _unmatchedFiles = new List<string>();
+        _skippedDirectories = new List<string>();
+        _hiddenEntryCount = 0;
+        _lastBackupDirectory = null;
         HasConverted = false;
         IsOverwriteInPlace = false;
         SelectedFileItem = null;

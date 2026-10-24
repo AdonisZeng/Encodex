@@ -68,6 +68,10 @@ public class EncodingConverter
         Failed
     }
 
+    /// <param name="onBackupCreated">Invoked with the backup folder right after it is
+    /// created, before any file is copied. A cancellation can abort the pass before
+    /// it returns a summary, so the caller needs the path early to keep the report's
+    /// "delete backup" action usable for a partially written folder.</param>
     public async Task<ConversionSummary> ConvertAsync(
         List<FileConversionItem> items,
         string sourceDirectory,
@@ -76,23 +80,45 @@ public class EncodingConverter
         IProgress<ConversionProgress>? progress = null,
         CancellationToken cancellationToken = default,
         bool overwriteInPlace = false,
-        int progressOffset = 0)
+        int progressOffset = 0,
+        Action<string>? onBackupCreated = null)
     {
         var selected = items.Where(i => i.IsSelected).ToList();
+
+        // Every round starts from a clean slate: a previous round's outcome (Failed,
+        // Skipped, ...) describes an earlier run, not this file's suitability. Without
+        // this reset a file that failed once would be silently excluded forever, and
+        // the binary marker had to be smuggled into Status to survive.
+        foreach (var item in selected)
+        {
+            item.Status = ConversionStatus.Pending;
+            item.StatusMessage = null;
+        }
 
         // In-place mode: back up every file that may be rewritten before touching any
         // of them, so a partial failure never leaves the originals unrecoverable.
         string? backupDirectory = null;
+        var backupFailed = new HashSet<FileConversionItem>();
         if (overwriteInPlace)
-            backupDirectory = await BackupFilesAsync(selected, sourceDirectory, progress, cancellationToken);
+        {
+            var backup = await BackupFilesAsync(
+                selected, sourceDirectory, progress, cancellationToken, onBackupCreated);
+            backupDirectory = backup.Directory;
+            backupFailed = backup.Failed;
+        }
 
         // Files whose backup failed must never be rewritten in place (the backup is
         // the only recovery path), so they are excluded from the conversion pass.
+        // The exclusion is driven by this round's backup outcome, not by Status.
         var convertList = overwriteInPlace
-            ? selected.Where(i => i.Status != ConversionStatus.Failed).ToList()
+            ? selected.Where(i => !backupFailed.Contains(i)).ToList()
             : selected;
 
-        int success = 0, skipped = 0, failed = 0, copied = 0, processed = 0;
+        // Backup failures are failures of this round: their files were not rewritten
+        // and their recovery copy is missing. They are excluded from convertList and
+        // never touch the conversion counters, so the count must start with them —
+        // otherwise the CLI would exit 0 ("success") after a real backup failure.
+        int success = 0, skipped = 0, failed = backupFailed.Count, copied = 0, processed = 0;
         using var semaphore = new SemaphoreSlim(Math.Max(1, Math.Min(Environment.ProcessorCount, MaxConcurrency)));
         var tasks = new List<Task>(convertList.Count);
 
@@ -161,16 +187,19 @@ public class EncodingConverter
 
     /// <summary>Copies every selected source file into a fresh temp backup folder,
     /// preserving the relative directory structure. Per-file failures (locked,
-    /// unreadable) mark the item Failed so it is excluded from the in-place rewrite
-    /// instead of aborting the whole backup pass. Progress covers the backup phase
-    /// (offset 0); the conversion phase continues from ConvertAsync's progressOffset.
-    /// Files are copied concurrently: the pass is disk-bound and a serial walk
-    /// dominates the total time on large trees.</summary>
-    private static async Task<string> BackupFilesAsync(
+    /// unreadable) mark the item Failed for the report and return the item in the
+    /// failed set, so the caller can exclude it from the in-place rewrite instead of
+    /// aborting the whole backup pass. Only <see cref="FileConversionItem.IsBinary"/>
+    /// files are skipped — they are never rewritten, so a backup would be wasted IO.
+    /// Progress covers the backup phase (offset 0); the conversion phase continues
+    /// from ConvertAsync's progressOffset. Files are copied concurrently: the pass is
+    /// disk-bound and a serial walk dominates the total time on large trees.</summary>
+    private static async Task<(string Directory, HashSet<FileConversionItem> Failed)> BackupFilesAsync(
         List<FileConversionItem> items,
         string sourceDirectory,
         IProgress<ConversionProgress>? progress,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Action<string>? onBackupCreated)
     {
         // The timestamp is only second-precise: two conversions started within the
         // same second must not share (and overwrite) one backup folder.
@@ -179,8 +208,14 @@ public class EncodingConverter
         for (int suffix = 2; Directory.Exists(backupDirectory); suffix++)
             backupDirectory = Path.Combine(Path.GetTempPath(), $"Encodex-backup-{stamp}-{suffix}");
         Directory.CreateDirectory(backupDirectory);
+        // Report the folder before a single copy runs: cancellation may abort the
+        // pass entirely, and the caller must still be able to delete what was made.
+        onBackupCreated?.Invoke(backupDirectory);
 
         int processed = 0;
+        // FileConversionItem has reference equality, so a plain set is enough; the
+        // lock only serializes writes from the concurrent backup workers.
+        var failed = new HashSet<FileConversionItem>();
         using var semaphore = new SemaphoreSlim(MaxConcurrency);
         var tasks = new List<Task>(items.Count);
 
@@ -193,10 +228,10 @@ public class EncodingConverter
                 {
                     cancellationToken.ThrowIfCancellationRequested();
 
-                    // Skipped items (binary files) are never rewritten in place, so
-                    // copying them would be wasted IO; they still advance progress so
-                    // the caller's backup/progress offset chain stays intact.
-                    if (item.Status != ConversionStatus.Skipped)
+                    // Binary files are never rewritten in place, so copying them would
+                    // be wasted IO; they still advance progress so the caller's
+                    // backup/progress offset chain stays intact.
+                    if (!item.IsBinary)
                     {
                         var sourcePath = Path.Combine(sourceDirectory, item.RelativePath);
                         var backupPath = Path.Combine(backupDirectory, item.RelativePath);
@@ -204,12 +239,16 @@ public class EncodingConverter
                         {
                             // Concurrent CreateDirectory calls on the same path are idempotent.
                             Directory.CreateDirectory(Path.GetDirectoryName(backupPath)!);
-                            File.Copy(sourcePath, backupPath, overwrite: true);
+                            await CopyFileAsync(sourcePath, backupPath, cancellationToken);
                         }
                         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
                         {
+                            // Kept for the report; the caller drops the item from the
+                            // rewrite pass because its recovery copy is missing.
                             item.Status = ConversionStatus.Failed;
                             item.StatusMessage = Res.Conv_BackupFailed;
+                            lock (failed)
+                                failed.Add(item);
                         }
                     }
 
@@ -229,7 +268,7 @@ public class EncodingConverter
         }
 
         await Task.WhenAll(tasks);
-        return backupDirectory;
+        return (backupDirectory, failed);
     }
 
     private static async Task<ConvertOutcome> ConvertOneAsync(
@@ -261,18 +300,25 @@ public class EncodingConverter
             var sourceEncoding = GetStrictEncodingFromName(item.DetectedEncoding);
             if (sourceEncoding == null)
             {
-                // Unknown encoding: nothing to convert, keep the file as-is.
+                // Binary files are copied as-is into a separate output tree so that
+                // tree stays complete; skipping the copy would silently drop them.
+                // They are still reported (and counted) as Skipped, because no
+                // encoding rewrite happened — "copied" would overstate the work.
+                if (item.IsBinary)
+                {
+                    if (!overwriteInPlace)
+                        CopyFile(sourcePath, outputPath);
+                    item.Status = ConversionStatus.Skipped;
+                    item.StatusMessage = Res.VM_Binary;
+                    return ConvertOutcome.Skipped;
+                }
+
+                // Unknown but non-binary: nothing to convert, keep the file as-is.
                 if (!overwriteInPlace)
                     CopyFile(sourcePath, outputPath);
-                // Binary files were already Skipped at scan time: an untouched file
-                // must not be re-reported as "copied".
-                if (item.Status != ConversionStatus.Skipped)
-                    item.Status = ConversionStatus.Copied;
-                // Preserve a scan-time reason (e.g. "二进制文件") when present.
-                item.StatusMessage ??= Res.Conv_UnknownCopy;
-                return item.Status == ConversionStatus.Skipped
-                    ? ConvertOutcome.Skipped
-                    : ConvertOutcome.Copied;
+                item.Status = ConversionStatus.Copied;
+                item.StatusMessage = Res.Conv_UnknownCopy;
+                return ConvertOutcome.Copied;
             }
 
             var target = GetStrictEncoding(targetEncoding);
@@ -432,8 +478,14 @@ public class EncodingConverter
                         var outputPath = Path.Combine(outputDirectory, relativePaths[index]);
                         // Concurrent CreateDirectory calls on the same path are idempotent.
                         Directory.CreateDirectory(Path.GetDirectoryName(outputPath)!);
-                        CopyFile(file, outputPath);
+                        await CopyFileAsync(file, outputPath, cancellationToken);
                         copied[index] = true;
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        // Cancellation is not a per-file failure: propagate it so the
+                        // pass stops instead of reporting every remaining file as lost.
+                        throw;
                     }
                     catch (Exception)
                     {
@@ -474,9 +526,13 @@ public class EncodingConverter
     /// Streaming decode → re-encode. Memory use stays constant regardless of file
     /// size. Strict exception fallbacks are used on both sides so that undecodable
     /// source bytes or unrepresentable characters surface as exceptions instead of
-    /// silently becoming replacement characters (garbage output).
+    /// silently becoming replacement characters (garbage output). Cancellation is
+    /// checked per buffer because .NET Framework's StreamReader.ReadAsync has no
+    /// token overload: without it a multi-megabyte file would ignore Cancel until
+    /// the whole file was processed. Internal so the cancellation behavior can be
+    /// tested without timing-dependent sleeps.
     /// </summary>
-    private static async Task ConvertFileAsync(
+    internal static async Task ConvertFileAsync(
         Stream sourceStream,
         string tempPath,
         Encoding sourceEncoding,
@@ -499,6 +555,9 @@ public class EncodingConverter
             reader.Read();
 
         using var output = new FileStream(tempPath, FileMode.Create, FileAccess.Write, FileShare.None, BufferSize, useAsync: true);
+        // A cancel request that arrives while the head was being read must not let
+        // even the preamble hit the scratch file.
+        cancellationToken.ThrowIfCancellationRequested();
         if (targetPreamble.Length > 0)
             await output.WriteAsync(targetPreamble, 0, targetPreamble.Length, cancellationToken);
 
@@ -509,10 +568,14 @@ public class EncodingConverter
         using var writer = new StreamWriter(output, targetEncoding, BufferSize, leaveOpen: false);
         var buffer = new char[BufferSize];
         int charsRead;
-        // StreamReader.ReadAsync has no CancellationToken overload on .NET Framework;
-        // cancellation is honored between files via ThrowIfCancellationRequested.
+        // StreamReader.ReadAsync has no CancellationToken overload on .NET Framework,
+        // so the token is observed before each buffer is re-encoded: a large file
+        // then aborts within one buffer instead of after the whole file.
         while ((charsRead = await reader.ReadAsync(buffer, 0, buffer.Length)) > 0)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
             await writer.WriteAsync(buffer, 0, charsRead);
+        }
         await writer.FlushAsync();
     }
 
@@ -569,6 +632,24 @@ public class EncodingConverter
         strict.EncoderFallback = EncoderFallback.ExceptionFallback;
         strict.DecoderFallback = DecoderFallback.ExceptionFallback;
         return strict;
+    }
+
+    /// <summary>Token-aware copy used by the backup and unmatched-file phases:
+    /// <see cref="File.Copy"/> cannot observe cancellation, so a multi-megabyte
+    /// file would keep Cancel inert for its whole duration. The synchronous
+    /// <see cref="CopyFile"/> stays for rescue paths (running after a failure),
+    /// where finishing the copy matters more than aborting halfway.</summary>
+    private static async Task CopyFileAsync(
+        string source, string destination, CancellationToken cancellationToken)
+    {
+        using (var input = new FileStream(
+            source, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, BufferSize, useAsync: true))
+        using (var output = new FileStream(
+            destination, FileMode.Create, FileAccess.Write, FileShare.None, BufferSize, useAsync: true))
+        {
+            await input.CopyToAsync(output, BufferSize, cancellationToken);
+        }
+        PreserveTimestamps(source, destination);
     }
 
     private static void CopyFile(string source, string destination)

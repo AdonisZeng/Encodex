@@ -108,4 +108,36 @@ public class AppSettingsStoreTests : IDisposable
         // The atomic write must not leave its scratch file behind.
         Assert.False(File.Exists(path + ".tmp"));
     }
+
+    [Fact]
+    public void Save_DoesNotLeaveBackupFile()
+    {
+        // File.Replace needs a backup name to stay recoverable, but that backup is
+        // only a transient artefact and must never outlive a successful save.
+        var path = SettingsPath();
+        var store = new AppSettingsStore(path);
+        store.Save(new AppSettings { SourceFolderPath = "first" });
+
+        store.Save(new AppSettings { SourceFolderPath = "second" });
+
+        Assert.False(File.Exists(path + ".bak"));
+    }
+
+    [Fact]
+    public void Save_WithStaleBackupFile_StillReplacesAndCleansUp()
+    {
+        // A backup left behind by a crashed save must not block the next write:
+        // ReplaceFile rejects an already existing backup name.
+        var path = SettingsPath();
+        var store = new AppSettingsStore(path);
+        store.Save(new AppSettings { SourceFolderPath = "first" });
+        File.WriteAllText(path + ".bak", "stale backup");
+
+        store.Save(new AppSettings { IsLightTheme = true, SourceFolderPath = "second" });
+
+        var loaded = store.Load();
+        Assert.True(loaded.IsLightTheme);
+        Assert.Equal("second", loaded.SourceFolderPath);
+        Assert.False(File.Exists(path + ".bak"));
+    }
 }

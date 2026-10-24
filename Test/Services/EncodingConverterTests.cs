@@ -1,6 +1,7 @@
 using System.IO;
 using System.Text;
 using Encodex.Models;
+using Encodex.Resources;
 using Encodex.Services;
 using Xunit;
 
@@ -584,6 +585,7 @@ public class EncodingConverterTests : IDisposable
             DetectedEncoding = null,          // binary: no encoding detected
             TargetEncoding = "utf-8",
             IsSelected = true,
+            IsBinary = true,
             Status = ConversionStatus.Skipped,
             StatusMessage = "二进制文件"
         };
@@ -593,9 +595,11 @@ public class EncodingConverterTests : IDisposable
             _sourceDir, _outputDir, new UTF8Encoding(false));
 
         Assert.Equal(ConversionStatus.Skipped, item.Status);
-        Assert.Equal("二进制文件", item.StatusMessage);
+        Assert.Equal(Res.VM_Binary, item.StatusMessage);
         Assert.Equal(1, summary.Skipped);
         Assert.Equal(0, summary.Copied);
+        // Binary files are copied as-is so the separate output tree stays complete;
+        // they still count as skipped because no encoding rewrite happened.
         Assert.Equal(bytes, File.ReadAllBytes(Path.Combine(_outputDir, "data.bin")));
     }
 
@@ -632,6 +636,7 @@ public class EncodingConverterTests : IDisposable
                 DetectedEncoding = null,   // binary: nothing to convert, never rewritten
                 TargetEncoding = "utf-8",
                 IsSelected = true,
+                IsBinary = true,
                 Status = ConversionStatus.Skipped
             }
         };
@@ -653,6 +658,125 @@ public class EncodingConverterTests : IDisposable
         // The Skipped item still advances progress so the bar deterministically reaches Total.
         Assert.Equal(2, progress.Updates.Max(u => u.Processed));
         Assert.Equal(2, progress.Updates.Max(u => u.Total));
+    }
+
+    // ---- 每轮状态独立：上一轮的结果不得决定本轮处理谁 ----
+
+    [Fact]
+    public async Task ConvertAsync_PreviousFailure_IsResetAndConvertedAgain()
+    {
+        var gbk = Encoding.GetEncoding("GBK");
+        var filePath = Path.Combine(_sourceDir, "retry.txt");
+        File.WriteAllBytes(filePath, gbk.GetBytes("你好世界"));
+
+        // A previous round failed on this file; this round must neither skip it nor
+        // surface the stale message. Only this round's outcome may be reported.
+        var item = new FileConversionItem
+        {
+            RelativePath = "retry.txt",
+            FileName = "retry.txt",
+            FileSize = new FileInfo(filePath).Length,
+            DetectedEncoding = "GBK",
+            TargetEncoding = "utf-8",
+            IsSelected = true,
+            Status = ConversionStatus.Failed,
+            StatusMessage = "old"
+        };
+
+        var summary = await new EncodingConverter().ConvertAsync(
+            new List<FileConversionItem> { item },
+            _sourceDir, _outputDir, new UTF8Encoding(false));
+
+        Assert.Equal(ConversionStatus.Success, item.Status);
+        Assert.Null(item.StatusMessage);
+        Assert.Equal(1, summary.Success);
+        Assert.Equal(0, summary.Failed);
+    }
+
+    [Fact]
+    public async Task ConvertAsync_BinaryItem_IsSkippedOnEveryRound()
+    {
+        var bytes = new byte[] { 0x00, 0x01, 0x02, 0x00, 0xFF };
+        var filePath = Path.Combine(_sourceDir, "data.bin");
+        File.WriteAllBytes(filePath, bytes);
+
+        // Binary-ness now lives in IsBinary, so a repeated round still classifies it
+        // as skipped after the per-round status reset instead of "copying" it.
+        var item = new FileConversionItem
+        {
+            RelativePath = "data.bin",
+            FileName = "data.bin",
+            FileSize = bytes.Length,
+            DetectedEncoding = null,
+            TargetEncoding = "utf-8",
+            IsSelected = true,
+            IsBinary = true,
+            Status = ConversionStatus.Skipped,
+            StatusMessage = Res.VM_Binary
+        };
+
+        var summary = await new EncodingConverter().ConvertAsync(
+            new List<FileConversionItem> { item },
+            _sourceDir, _sourceDir, new UTF8Encoding(false), overwriteInPlace: true);
+
+        Assert.Equal(ConversionStatus.Skipped, item.Status);
+        Assert.Equal(Res.VM_Binary, item.StatusMessage);
+        Assert.Equal(1, summary.Skipped);
+        Assert.Equal(0, summary.Copied);
+        Assert.Equal(0, summary.Success);
+        // Skipped binary files are never rewritten in place.
+        Assert.Equal(bytes, File.ReadAllBytes(filePath));
+    }
+
+    // ---- 取消必须在大文件内部生效，而不是只在文件之间 ----
+
+    [Fact]
+    public async Task ConvertFileAsync_CancelledDuringRead_ThrowsAndLeavesNoScratchFile()
+    {
+        var gbk = Encoding.GetEncoding("GBK");
+        var filePath = Path.Combine(_sourceDir, "big.txt");
+        File.WriteAllBytes(filePath,
+            gbk.GetBytes(string.Concat(Enumerable.Repeat("取消测试文本", 1000))));
+
+        var tempPath = Path.Combine(_sourceDir, "big.txt.1a2b3c4d.tmp");
+        using var cts = new CancellationTokenSource();
+        try
+        {
+            using var source = new FileStream(
+                filePath, FileMode.Open, FileAccess.Read, FileShare.Read, 64 * 1024, useAsync: true);
+            using var cancelling = new CancelOnFirstReadStream(source, cts);
+
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+                EncodingConverter.ConvertFileAsync(
+                    cancelling, tempPath, gbk, new UTF8Encoding(false),
+                    Array.Empty<byte>(), cts.Token));
+        }
+        finally
+        {
+            // The scratch file belongs to this test now: ConvertFileAsync is called
+            // directly, so ConvertOneAsync's cleanup finally does not run.
+            if (File.Exists(tempPath))
+                File.Delete(tempPath);
+        }
+
+        Assert.False(File.Exists(tempPath));
+    }
+
+    [Fact]
+    public async Task CopyUnmatchedFilesAsync_CancelledToken_ThrowsWithoutOutput()
+    {
+        var filePath = Path.Combine(_sourceDir, "img.png");
+        File.WriteAllBytes(filePath, new byte[] { 0x89, 0x50 });
+
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            new EncodingConverter().CopyUnmatchedFilesAsync(
+                _sourceDir, _outputDir, new List<string> { filePath },
+                cancellationToken: cts.Token));
+
+        Assert.False(File.Exists(Path.Combine(_outputDir, "img.png")));
     }
 
     // ---- 回归：转换的临时文件不得占用（覆盖并销毁）项目中真实存在的同名文件 ----
@@ -871,6 +995,56 @@ public class EncodingConverterTests : IDisposable
     }
 
     [Fact]
+    public async Task ConvertAsync_BackupFailure_CountsAsFailedInSummary()
+    {
+        // A locked source makes the in-place backup fail. The item is excluded from
+        // the rewrite (its only recovery copy is missing), and the summary must count
+        // it as failed: the CLI derives its exit code from summary.Failed, so a silent
+        // zero here would report success after a real failure.
+        var filePath = Path.Combine(_sourceDir, "locked.txt");
+        File.WriteAllText(filePath, "hello");
+        var item = new FileConversionItem
+        {
+            RelativePath = "locked.txt",
+            FileName = "locked.txt",
+            FileSize = new FileInfo(filePath).Length,
+            DetectedEncoding = "utf-8",
+            TargetEncoding = "UTF-8 (无 BOM)",
+            IsSelected = true
+        };
+
+        ConversionSummary summary;
+        // The lock must be released before the content assertion: reading a file held
+        // with FileShare.None would throw instead of proving it was left untouched.
+        using (new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.None))
+        {
+            summary = await new EncodingConverter().ConvertAsync(
+                new List<FileConversionItem> { item },
+                _sourceDir, _sourceDir, new UTF8Encoding(false),
+                overwriteInPlace: true);
+        }
+
+        try
+        {
+            Assert.Equal(1, summary.Failed);
+            Assert.Equal(0, summary.Success);
+            Assert.Equal(ConversionStatus.Failed, item.Status);
+            Assert.Equal(Res.Conv_BackupFailed, item.StatusMessage);
+            Assert.Equal("hello", File.ReadAllText(filePath));
+        }
+        finally
+        {
+            // The backup folder lives in %TEMP% and is not owned by the fixture.
+            try
+            {
+                if (summary.BackupDirectory != null && Directory.Exists(summary.BackupDirectory))
+                    Directory.Delete(summary.BackupDirectory, recursive: true);
+            }
+            catch { }
+        }
+    }
+
+    [Fact]
     public async Task ConvertAsync_Utf16LeBom_ToUtf16LeNoBom_StripsPreamble()
     {
         // Same code page, different BOM intent: a real conversion must run, and the
@@ -1050,11 +1224,86 @@ public class EncodingConverterTests : IDisposable
     }
 
     /// <summary>Synchronous IProgress collector: Progress&lt;T&gt; would marshal
-    /// asynchronously without a SynchronizationContext and race the assertions.</summary>
+    /// asynchronously without a SynchronizationContext and race the assertions.
+    /// Reports arrive from concurrent worker threads, so the backing list is guarded
+    /// by a lock — a bare List&lt;T&gt;.Add corrupts under parallel writers.</summary>
     private sealed class CollectingProgress : IProgress<ConversionProgress>
     {
-        public List<ConversionProgress> Updates { get; } = new();
+        private readonly object _gate = new();
+        private readonly List<ConversionProgress> _updates = new();
 
-        public void Report(ConversionProgress value) => Updates.Add(value);
+        public IReadOnlyList<ConversionProgress> Updates
+        {
+            get { lock (_gate) return _updates.ToArray(); }
+        }
+
+        public void Report(ConversionProgress value)
+        {
+            lock (_gate)
+                _updates.Add(value);
+        }
+    }
+
+    /// <summary>Read-only wrapper that cancels a token on its first read, making
+    /// "Cancel arrives mid-file" deterministic instead of timing-dependent.</summary>
+    private sealed class CancelOnFirstReadStream : Stream
+    {
+        private readonly Stream _inner;
+        private readonly CancellationTokenSource _cts;
+        private int _cancelled;
+
+        public CancelOnFirstReadStream(Stream inner, CancellationTokenSource cts)
+        {
+            _inner = inner;
+            _cts = cts;
+        }
+
+        private void CancelOnce()
+        {
+            if (Interlocked.Exchange(ref _cancelled, 1) == 0)
+                _cts.Cancel();
+        }
+
+        public override int Read(byte[] buffer, int offset, int count)
+        {
+            CancelOnce();
+            return _inner.Read(buffer, offset, count);
+        }
+
+        public override Task<int> ReadAsync(
+            byte[] buffer, int offset, int count, CancellationToken cancellationToken)
+        {
+            CancelOnce();
+            return _inner.ReadAsync(buffer, offset, count, cancellationToken);
+        }
+
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => _inner.Length;
+
+        public override long Position
+        {
+            get => _inner.Position;
+            set => throw new NotSupportedException();
+        }
+
+        public override void Flush() { }
+
+        public override long Seek(long offset, SeekOrigin origin)
+            => throw new NotSupportedException();
+
+        public override void SetLength(long value)
+            => throw new NotSupportedException();
+
+        public override void Write(byte[] buffer, int offset, int count)
+            => throw new NotSupportedException();
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+                _inner.Dispose();
+            base.Dispose(disposing);
+        }
     }
 }

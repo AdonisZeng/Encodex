@@ -57,7 +57,32 @@ public partial class PreviewWindow : Window
             return;
         }
 
-        SourcePreview.Text = sourceEncoding.GetString(head);
+        // 预览必须与真实转换口径一致：转换端用 ExceptionFallback 严格解码，这里若继续
+        // 宽容解码，非法字节会被替换成 '?' 显示为"看似正常"的乱码，用户会误判可以
+        // 转换，实际却因解码失败被原样复制。
+        var strictSource = (Encoding)sourceEncoding.Clone();
+        strictSource.DecoderFallback = DecoderFallback.ExceptionFallback;
+
+        // head 只读取文件前 8192 字节，末尾可能正好切断一个多字节字符。
+        // GetString 会把这种截断也算作非法并抛异常；而 GetChars 传 flush: false
+        // 会保留末尾未完成的序列、只对完整且非法的序列抛 DecoderFallbackException，
+        // 从而既保持严格，又不误伤正常的截断边界。
+        char[] chars = new char[head.Length + 1];
+        int charCount;
+        try
+        {
+            charCount = strictSource.GetDecoder()
+                .GetChars(head, 0, head.Length, chars, 0, flush: false);
+        }
+        catch (DecoderFallbackException)
+        {
+            SourcePreview.Text = Res.Prev_DecodeFailed;
+            TargetPreview.Text = "";
+            return;
+        }
+
+        string decoded = new string(chars, 0, charCount);
+        SourcePreview.Text = decoded;
 
         // Strict target: unrepresentable characters surface as a warning instead of
         // silently becoming replacement characters.
@@ -65,7 +90,7 @@ public partial class PreviewWindow : Window
         strict.EncoderFallback = EncoderFallback.ExceptionFallback;
         try
         {
-            var bytes = strict.GetBytes(sourceEncoding.GetString(head));
+            var bytes = strict.GetBytes(decoded);
             TargetPreview.Text = HexDump(bytes, 1024);
         }
         catch (EncoderFallbackException)

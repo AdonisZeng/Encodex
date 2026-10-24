@@ -125,12 +125,88 @@ public class FileScannerTests : IDisposable
         var scanner = new FileScanner();
         var profile = new ExtensionProfile();
 
-        var (matched, unmatched) = scanner.ScanAll(_tempDir, profile);
+        var scan = scanner.ScanAll(_tempDir, profile);
 
-        Assert.Single(matched);
-        Assert.Equal("Main.cs", matched[0].FileName);
-        Assert.Single(unmatched);
-        Assert.EndsWith("logo.png", unmatched[0]);
+        Assert.Single(scan.Matched);
+        Assert.Equal("Main.cs", scan.Matched[0].FileName);
+        Assert.Single(scan.Unmatched);
+        Assert.EndsWith("logo.png", scan.Unmatched[0]);
+    }
+
+    // ---- 扫描跳过项必须可见，而不是静默丢弃 ----
+
+    [Fact]
+    public void ScanAll_ReportsRuleSkippedDirectories()
+    {
+        Directory.CreateDirectory(Path.Combine(_tempDir, "node_modules"));
+        Directory.CreateDirectory(Path.Combine(_tempDir, "src"));
+        File.WriteAllText(Path.Combine(_tempDir, "node_modules", "x.js"), "js");
+        File.WriteAllText(Path.Combine(_tempDir, "src", "a.cs"), "code");
+
+        var scan = new FileScanner().ScanAll(_tempDir, new ExtensionProfile());
+
+        Assert.Contains("node_modules", scan.SkippedDirectories);
+        Assert.Single(scan.Matched);
+        Assert.Equal(Path.Combine("src", "a.cs"), scan.Matched[0].RelativePath);
+    }
+
+    [Fact]
+    public void ScanAll_CountsHiddenFilesAndDirectories()
+    {
+        var hiddenDir = Path.Combine(_tempDir, "hiddenDir");
+        Directory.CreateDirectory(hiddenDir);
+        File.WriteAllText(Path.Combine(hiddenDir, "b.cs"), "code");
+        var hiddenFile = Path.Combine(_tempDir, "secret.cs");
+        File.WriteAllText(hiddenFile, "code");
+        File.WriteAllText(Path.Combine(_tempDir, "visible.cs"), "code");
+
+        try
+        {
+            File.SetAttributes(hiddenFile, FileAttributes.Hidden);
+            // .NET Framework has no Directory.SetAttributes; DirectoryInfo exposes
+            // the same setter.
+            new DirectoryInfo(hiddenDir).Attributes = FileAttributes.Hidden;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            // Some environments reject attribute changes; the walk itself is still
+            // covered by the visible file, so do not fail on an unrelated permission.
+            return;
+        }
+
+        try
+        {
+            var scan = new FileScanner().ScanAll(_tempDir, new ExtensionProfile());
+
+            Assert.True(scan.HiddenEntryCount >= 2);
+            Assert.Single(scan.Matched);
+            Assert.Equal("visible.cs", scan.Matched[0].FileName);
+        }
+        finally
+        {
+            File.SetAttributes(hiddenFile, FileAttributes.Normal);
+            new DirectoryInfo(hiddenDir).Attributes = FileAttributes.Normal;
+        }
+    }
+
+    [Fact]
+    public void ScanAll_SkipsExcludedDirectoriesWithoutReportingThem()
+    {
+        // "out" is also a rule-skipped name: checking the exclusion first proves the
+        // previous run's output is not mislabelled as something the rules dropped.
+        var sourceDir = Path.Combine(_tempDir, "src");
+        var outputDir = Path.Combine(sourceDir, "out");
+        Directory.CreateDirectory(outputDir);
+        File.WriteAllText(Path.Combine(outputDir, "converted.cs"), "code");
+        File.WriteAllText(Path.Combine(sourceDir, "keep.cs"), "code");
+
+        // Upper case exercises the case-insensitive, GetFullPath-normalized compare.
+        var scan = new FileScanner().ScanAll(
+            sourceDir, new ExtensionProfile(), new[] { outputDir.ToUpperInvariant() });
+
+        Assert.Single(scan.Matched);
+        Assert.Equal("keep.cs", scan.Matched[0].FileName);
+        Assert.Empty(scan.SkippedDirectories);
     }
 
     // ---- C6: the explicit-stack walk must survive deep nesting ----

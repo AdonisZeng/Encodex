@@ -41,23 +41,51 @@ public static class CliRunner
         var extensions = new List<string>();
         bool overwrite = false;
 
+        // An omitted --ext means "use the built-in defaults", while an explicit
+        // --ext with an empty payload means "the user asked for a filter that
+        // matches nothing". Distinguishing the two prevents the old silent
+        // fallback that converted the whole tree with default rules instead of
+        // honouring the user's (broken) filter. If the flag is the last token,
+        // that is a user error rather than an omitted option, so report it.
+        bool sawExtOption = false;
+
         for (int i = 0; i < args.Length; i++)
         {
             switch (args[i].ToLowerInvariant())
             {
                 case "--src":
-                    sourceDir = ReadValue(args, ref i);
+                {
+                    if (!TryReadValue(args, ref i, out var value))
+                        return ReportMissingValue(writer, "--src");
+                    sourceDir = value;
                     break;
+                }
                 case "--target":
-                    targetName = ReadValue(args, ref i);
+                {
+                    if (!TryReadValue(args, ref i, out var value))
+                        return ReportMissingValue(writer, "--target");
+                    targetName = value;
                     break;
+                }
                 case "--out":
-                    outDir = ReadValue(args, ref i);
+                {
+                    // Falling back to the auto-named folder here used to hide the
+                    // typo and scatter output into an unexpected location. An explicit
+                    // empty value ("") is the same user error as an omitted one.
+                    if (!TryReadValue(args, ref i, out var value) || string.IsNullOrWhiteSpace(value))
+                        return ReportMissingValue(writer, "--out");
+                    outDir = value;
                     break;
+                }
                 case "--ext":
-                    extensions.AddRange((ReadValue(args, ref i) ?? "")
-                        .Split(new[] { ',', ';' }, StringSplitOptions.RemoveEmptyEntries));
+                {
+                    if (!TryReadValue(args, ref i, out var value))
+                        return ReportMissingValue(writer, "--ext");
+                    sawExtOption = true;
+                    extensions.AddRange(value.Split(
+                        new[] { ',', ';' }, StringSplitOptions.RemoveEmptyEntries));
                     break;
+                }
                 case "--overwrite":
                     overwrite = true;
                     break;
@@ -94,7 +122,7 @@ public static class CliRunner
         }
 
         var profile = new ExtensionProfile(loadDefaults: false);
-        if (extensions.Count == 0)
+        if (!sawExtOption)
         {
             foreach (var ext in ExtensionProfile.GetDefaultExtensions())
                 profile.AddExtension(ext);
@@ -106,6 +134,8 @@ public static class CliRunner
                 if (!profile.AddExtension(ext))
                     writer.WriteLine(string.Format(Res.Cli_InvalidExt, ext));
             }
+            // sawExtOption but nothing usable survived ("--ext" alone, `""` or
+            // ","): abort instead of quietly scanning everything by default.
             if (profile.Extensions.Count == 0)
             {
                 writer.WriteLine(Res.Cli_NoValidExt);
@@ -116,9 +146,9 @@ public static class CliRunner
         // Scan + detect.
         var scanner = new FileScanner();
         var detector = new EncodingDetector();
-        var (matched, unmatched) = scanner.ScanAll(sourceDir!, profile);
+        var scan = scanner.ScanAll(sourceDir!, profile);
         var items = new List<FileConversionItem>();
-        foreach (var file in matched)
+        foreach (var file in scan.Matched)
         {
             // A file that vanished or turned unreadable between the scan and this
             // read must not crash the batch: degrade it to "unknown", which the
@@ -139,6 +169,7 @@ public static class CliRunner
                 FileSize = file.FileSize,
                 DetectedEncoding = detection.EncodingName,
                 TargetEncoding = targetEncoding.WebName,
+                IsBinary = detection.IsBinary,
                 Status = detection.IsBinary ? ConversionStatus.Skipped : ConversionStatus.Pending,
                 StatusMessage = detection.IsBinary ? Res.VM_Binary : null
             });
@@ -177,7 +208,7 @@ public static class CliRunner
             items, sourceDir!, targetDir!, targetEncoding, overwriteInPlace: overwrite))
             .GetAwaiter().GetResult();
 
-        writer.WriteLine(string.Format(Res.Cli_ScanSummary, items.Count, unmatched.Count));
+        writer.WriteLine(string.Format(Res.Cli_ScanSummary, items.Count, scan.Unmatched.Count));
         writer.WriteLine(string.Format(Res.Cli_ConvertSummary,
             summary.Success, summary.Skipped, summary.Failed, summary.Copied));
         if (!string.IsNullOrEmpty(summary.BackupDirectory))
@@ -191,12 +222,28 @@ public static class CliRunner
 
     private static readonly EncodingConverter Converter = new();
 
-    private static string? ReadValue(string[] args, ref int index)
+    /// <summary>
+    /// Reads the value following an option flag. Returns false and leaves
+    /// <paramref name="index"/> untouched when the flag is the last token, so
+    /// callers can report a precise "missing value" error instead of silently
+    /// treating the option as if it were never supplied.
+    /// </summary>
+    private static bool TryReadValue(string[] args, ref int index, out string value)
     {
         if (index + 1 >= args.Length)
-            return null;
+        {
+            value = "";
+            return false;
+        }
         index++;
-        return args[index];
+        value = args[index];
+        return true;
+    }
+
+    private static int ReportMissingValue(TextWriter writer, string option)
+    {
+        writer.WriteLine(string.Format(Res.Cli_MissingValue, option));
+        return 2;
     }
 
     private static Encoding? ResolveTargetEncoding(string name)
